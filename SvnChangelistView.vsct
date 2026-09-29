@@ -12,6 +12,9 @@
       <Group guid="guidSvnChangelistViewCmdSet" id="MyMenuGroup" priority="0x0600">
         <Parent guid="guidSHLMainMenu" id="IDG_VS_WNDO_OTRWNDWS0" />
       </Group>
+      <!-- 解决方案资源管理器右键菜单分组：由下面 CommandPlacement 挂到 项目/文件/文件夹/解决方案 四个上下文菜单 -->
+      <Group guid="guidSvnChangelistViewCmdSet" id="ShowLogGroup" priority="0x0600">
+      </Group>
     </Groups>
 
     <Buttons>
@@ -29,16 +32,41 @@
           <CommandName>SVNChangeListBadge</CommandName>
         </Strings>
       </Button>
+      <!-- 解决方案资源管理器右键"SVN Show Log"：调 TortoiseProc 打开日志 -->
+      <Button guid="guidSvnChangelistViewCmdSet" id="cmdIdShowLog" priority="0x0100" type="Button">
+        <Parent guid="guidSvnChangelistViewCmdSet" id="ShowLogGroup" />
+        <Strings>
+          <ButtonText>SVN Show Log</ButtonText>
+        </Strings>
+      </Button>
     </Buttons>
 
   </Commands>
+
+  <!-- 把 Show Log 分组挂到解决方案资源管理器的四类右键菜单（vsshlids.h 中的 IDM_VS_CTXT_*） -->
+  <CommandPlacements>
+    <CommandPlacement guid="guidSvnChangelistViewCmdSet" id="ShowLogGroup" priority="0x0600">
+      <Parent guid="guidSHLMainMenu" id="IDM_VS_CTXT_SOLNNODE" />
+    </CommandPlacement>
+    <CommandPlacement guid="guidSvnChangelistViewCmdSet" id="ShowLogGroup" priority="0x0600">
+      <Parent guid="guidSHLMainMenu" id="IDM_VS_CTXT_PROJNODE" />
+    </CommandPlacement>
+    <CommandPlacement guid="guidSvnChangelistViewCmdSet" id="ShowLogGroup" priority="0x0600">
+      <Parent guid="guidSHLMainMenu" id="IDM_VS_CTXT_FOLDERNODE" />
+    </CommandPlacement>
+    <CommandPlacement guid="guidSvnChangelistViewCmdSet" id="ShowLogGroup" priority="0x0600">
+      <Parent guid="guidSHLMainMenu" id="IDM_VS_CTXT_ITEMNODE" />
+    </CommandPlacement>
+  </CommandPlacements>
 
   <Symbols>
     <GuidSymbol name="guidSvnChangelistViewPackage" value="{8a5c2f31-4b7d-4e2a-9c1b-3f6d8a2e5c74}" />
     <GuidSymbol name="guidSvnChangelistViewCmdSet" value="{9d3f1a47-2e86-4c5b-a1d9-7c4b8e2f6a31}">
       <IDSymbol name="MyMenuGroup" value="0x1000" />
+      <IDSymbol name="ShowLogGroup" value="0x1020" />
       <IDSymbol name="cmdIdSvnChangelistView" value="0x0100" />
       <IDSymbol name="cmdIdBadge" value="0x0200" />
+      <IDSymbol name="cmdIdShowLog" value="0x0300" />
     </GuidSymbol>
   </Symbols>
 

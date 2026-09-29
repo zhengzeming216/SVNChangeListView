@@ -1,5 +1,8 @@
 using System;
+using System.Collections.Generic;
 using System.ComponentModel.Design;
+using System.Diagnostics;
+using System.IO;
 using System.Runtime.InteropServices;
 using System.Threading;
 using System.Windows;
@@ -44,6 +47,17 @@ namespace SvnChangelistView
                     Text = L10n.T("本地专用: 0", "Local-only: 0")
                 };
                 mcs.AddCommand(_badgeCommand);
+
+                // 解决方案资源管理器右键"SVN Show Log"：调 TortoiseProc 打开日志
+                var showLogId = new CommandID(new Guid(Guids.CommandSetString), 0x0300);
+                var showLogCommand = new OleMenuCommand((s, e) => ShowLog(), showLogId);
+                showLogCommand.BeforeQueryStatus += (s, e) =>
+                {
+                    ThreadHelper.ThrowIfNotOnUIThread();
+                    var c = (OleMenuCommand)s;
+                    c.Visible = c.Enabled = GetSelectedPaths().Count > 0;
+                };
+                mcs.AddCommand(showLogCommand);
             }
 
             SvnChangelistControl.IgnoreCountChanged += OnIgnoreCountChanged;
@@ -106,6 +120,132 @@ namespace SvnChangelistView
             {
                 windowFrame.Show();
             }
+        }
+
+        /// <summary>解决方案资源管理器右键"SVN Show Log"：把选中的项目/文件/文件夹路径传给 TortoiseProc 打开日志窗口。</summary>
+        private void ShowLog()
+        {
+            ThreadHelper.ThrowIfNotOnUIThread();
+
+            var paths = GetSelectedPaths();
+            if (paths.Count == 0)
+            {
+                return;
+            }
+
+            // TortoiseSVN 多路径用 * 分隔
+            var joined = string.Join("*", paths);
+            try
+            {
+                var psi = new ProcessStartInfo
+                {
+                    FileName = ResolveTortoiseProc(),
+                    Arguments = $"/command:log /path:\"{joined}\"",
+                    UseShellExecute = true
+                };
+                Process.Start(psi);
+            }
+            catch (Exception ex)
+            {
+                System.Windows.MessageBox.Show(
+                    L10n.T("无法启动 TortoiseSVN 日志：", "Cannot launch TortoiseSVN log: ") + ex.Message,
+                    "SVN ChangeList View", System.Windows.MessageBoxButton.OK, System.Windows.MessageBoxImage.Warning);
+            }
+        }
+
+        /// <summary>取当前解决方案资源管理器中选中项的文件系统路径（支持单选与 Ctrl/Shift 多选）。</summary>
+        private List<string> GetSelectedPaths()
+        {
+            ThreadHelper.ThrowIfNotOnUIThread();
+            var paths = new List<string>();
+
+            // VSSDK 17.x 已移除 SVsMonitorSelection 服务类，直接用接口类型取服务（SID==IID）
+            var monitorSelection = GetService(typeof(IVsMonitorSelection)) as IVsMonitorSelection;
+            if (monitorSelection == null)
+            {
+                return paths;
+            }
+
+            var hr = monitorSelection.GetCurrentSelection(out IntPtr hierPtr, out uint itemId,
+                out IVsMultiItemSelect multiSelect, out _);
+            if (ErrorHandler.Failed(hr))
+            {
+                return paths;
+            }
+
+            try
+            {
+                if (multiSelect != null)
+                {
+                    multiSelect.GetSelectionInfo(out uint itemCount, out _);
+                    if (itemCount > 0)
+                    {
+                        var items = new VSITEMSELECTION[itemCount];
+                        // dwFlags 传 0 取全部选中项（__VSGSIFLAGS 仅有 GSIF_NONE=0）
+                        multiSelect.GetSelectedItems(0, itemCount, items);
+                        foreach (var sel in items)
+                        {
+                            AddPath(sel.pHier, sel.itemid, paths);
+                        }
+                    }
+                }
+                else if (hierPtr != IntPtr.Zero)
+                {
+                    var hier = Marshal.GetUniqueObjectForIUnknown(hierPtr) as IVsHierarchy;
+                    AddPath(hier, itemId, paths);
+                }
+            }
+            finally
+            {
+                if (hierPtr != IntPtr.Zero)
+                {
+                    Marshal.Release(hierPtr);
+                }
+            }
+
+            return paths;
+        }
+
+        private static void AddPath(IVsHierarchy hier, uint itemId, List<string> paths)
+        {
+            if (hier == null)
+            {
+                return;
+            }
+
+            // 项目/文件项通常能用 GetMkDocument 拿到真实磁盘路径
+            if (hier is IVsProject project &&
+                ErrorHandler.Succeeded(project.GetMkDocument(itemId, out string doc)) &&
+                !string.IsNullOrEmpty(doc))
+            {
+                paths.Add(doc);
+                return;
+            }
+
+            // 文件夹等回退到 CanonicalName（仅当确实是存在的文件/目录时才采用）
+            if (ErrorHandler.Succeeded(hier.GetCanonicalName(itemId, out string name)) &&
+                !string.IsNullOrEmpty(name) &&
+                (File.Exists(name) || Directory.Exists(name)))
+            {
+                paths.Add(name);
+            }
+        }
+
+        private static string ResolveTortoiseProc()
+        {
+            foreach (var candidate in new[]
+            {
+                @"C:\Program Files\TortoiseSVN\bin\TortoiseProc.exe",
+                @"C:\Program Files (x86)\TortoiseSVN\bin\TortoiseProc.exe"
+            })
+            {
+                if (File.Exists(candidate))
+                {
+                    return candidate;
+                }
+            }
+
+            return "TortoiseProc.exe";
         }
     }
 
