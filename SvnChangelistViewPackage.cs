@@ -1,8 +1,5 @@
 using System;
-using System.Collections.Generic;
 using System.ComponentModel.Design;
-using System.Diagnostics;
-using System.IO;
 using System.Runtime.InteropServices;
 using System.Threading;
 using System.Windows;
@@ -18,7 +15,7 @@ namespace SvnChangelistView
 {
     [PackageRegistration(UseManagedResourcesOnly = true, AllowsBackgroundLoading = true)]
     [Guid(Guids.PackageGuidString)]
-    [ProvideMenuResource("Menus.ctmenu", 2)]
+    [ProvideMenuResource("Menus.ctmenu", 1)]
     [ProvideAutoLoad(VSConstants.UICONTEXT.SolutionExists_string, PackageAutoLoadFlags.BackgroundLoad)]
     [ProvideToolWindow(typeof(SvnChangelistWindow))]
     [ProvideToolWindowVisibility(typeof(SvnChangelistWindow), VSConstants.UICONTEXT.SolutionExists_string)]
@@ -34,7 +31,6 @@ namespace SvnChangelistView
             L10n.Load();
 
             var mcs = await this.GetServiceAsync(typeof(IMenuCommandService)) as OleMenuCommandService;
-            bool showLogAdded = false;
             if (mcs != null)
             {
                 var menuCommandId = new CommandID(new Guid(Guids.CommandSetString), 0x0100);
@@ -48,27 +44,6 @@ namespace SvnChangelistView
                     Text = L10n.T("本地专用: 0", "Local-only: 0")
                 };
                 mcs.AddCommand(_badgeCommand);
-
-                // 解决方案资源管理器右键"SVN Show Log"：调 TortoiseProc 打开日志
-                // 注意：菜单项必须始终 Visible（解析失败只置灰），否则路径解析一旦失败就永久消失
-                var showLogId = new CommandID(new Guid(Guids.CommandSetString), 0x0300);
-                var showLogCommand = new OleMenuCommand((s, e) => ShowLog(), showLogId);
-                showLogCommand.BeforeQueryStatus += (s, e) =>
-                {
-                    ThreadHelper.ThrowIfNotOnUIThread();
-                    var c = (OleMenuCommand)s;
-                    c.Visible = true;
-                    try
-                    {
-                        c.Enabled = GetSelectedPaths().Count > 0;
-                    }
-                    catch (Exception)
-                    {
-                        c.Enabled = true; // 解析异常时仍可点击，交给 ShowLog 内部处理
-                    }
-                };
-                mcs.AddCommand(showLogCommand);
-                showLogAdded = true;
             }
 
             SvnChangelistControl.IgnoreCountChanged += OnIgnoreCountChanged;
@@ -131,145 +106,6 @@ namespace SvnChangelistView
             {
                 windowFrame.Show();
             }
-        }
-
-        /// <summary>解决方案资源管理器右键"SVN Show Log"：把选中的项目/文件/文件夹路径传给 TortoiseProc 打开日志窗口。</summary>
-        /// <summary>供状态栏徽标右键菜单调用：对当前选中项打开 SVN 日志。</summary>
-        internal void ShowLogFromSelection()
-        {
-            ThreadHelper.ThrowIfNotOnUIThread();
-            ShowLog();
-        }
-
-        private void ShowLog()
-        {
-            ThreadHelper.ThrowIfNotOnUIThread();
-
-            var paths = GetSelectedPaths();
-            if (paths.Count == 0)
-            {
-                return;
-            }
-
-            // TortoiseSVN 多路径用 * 分隔
-            var joined = string.Join("*", paths);
-            try
-            {
-                var psi = new ProcessStartInfo
-                {
-                    FileName = ResolveTortoiseProc(),
-                    Arguments = $"/command:log /path:\"{joined}\"",
-                    UseShellExecute = true
-                };
-                Process.Start(psi);
-            }
-            catch (Exception ex)
-            {
-                System.Windows.MessageBox.Show(
-                    L10n.T("无法启动 TortoiseSVN 日志：", "Cannot launch TortoiseSVN log: ") + ex.Message,
-                    "SVN ChangeList View", System.Windows.MessageBoxButton.OK, System.Windows.MessageBoxImage.Warning);
-            }
-        }
-
-        /// <summary>取当前解决方案资源管理器中选中项的文件系统路径（支持单选与 Ctrl/Shift 多选）。</summary>
-        private List<string> GetSelectedPaths()
-        {
-            ThreadHelper.ThrowIfNotOnUIThread();
-            var paths = new List<string>();
-
-            // VSSDK 17.x 已移除 SVsMonitorSelection 服务类，直接用接口类型取服务（SID==IID）
-            var monitorSelection = GetService(typeof(IVsMonitorSelection)) as IVsMonitorSelection;
-            if (monitorSelection == null)
-            {
-                return paths;
-            }
-
-            var hr = monitorSelection.GetCurrentSelection(out IntPtr hierPtr, out uint itemId,
-                out IVsMultiItemSelect multiSelect, out _);
-            if (ErrorHandler.Failed(hr))
-            {
-                return paths;
-            }
-
-            try
-            {
-                if (multiSelect != null)
-                {
-                    multiSelect.GetSelectionInfo(out uint itemCount, out _);
-                    if (itemCount > 0)
-                    {
-                        var items = new VSITEMSELECTION[itemCount];
-                        // dwFlags 传 0 取全部选中项（__VSGSIFLAGS 仅有 GSIF_NONE=0）
-                        multiSelect.GetSelectedItems(0, itemCount, items);
-                        foreach (var sel in items)
-                        {
-                            AddPath(sel.pHier, sel.itemid, paths);
-                        }
-                    }
-                }
-                else if (hierPtr != IntPtr.Zero)
-                {
-                    var hier = Marshal.GetUniqueObjectForIUnknown(hierPtr) as IVsHierarchy;
-                    AddPath(hier, itemId, paths);
-                }
-            }
-            finally
-            {
-                if (hierPtr != IntPtr.Zero)
-                {
-                    Marshal.Release(hierPtr);
-                }
-            }
-
-            return paths;
-        }
-
-        private static void AddPath(IVsHierarchy hier, uint itemId, List<string> paths)
-        {
-            if (hier == null)
-            {
-                return;
-            }
-
-            string candidate = null;
-
-            // 项目/文件项通常能用 GetMkDocument 拿到真实磁盘路径
-            if (hier is IVsProject project &&
-                ErrorHandler.Succeeded(project.GetMkDocument(itemId, out string doc)) &&
-                !string.IsNullOrEmpty(doc))
-            {
-                candidate = doc;
-            }
-
-            // 文件夹/虚拟节点回退到 CanonicalName（不再要求磁盘上存在：CMake/筛选器/NuGet 等虚拟节点也应有入口）
-            if (string.IsNullOrEmpty(candidate) &&
-                ErrorHandler.Succeeded(hier.GetCanonicalName(itemId, out string name)) &&
-                !string.IsNullOrEmpty(name))
-            {
-                candidate = name;
-            }
-
-            if (!string.IsNullOrEmpty(candidate) && !paths.Contains(candidate))
-            {
-                paths.Add(candidate);
-            }
-        }
-
-        private static string ResolveTortoiseProc()
-        {
-            foreach (var candidate in new[]
-            {
-                @"C:\Program Files\TortoiseSVN\bin\TortoiseProc.exe",
-                @"C:\Program Files (x86)\TortoiseSVN\bin\TortoiseProc.exe"
-            })
-            {
-                if (File.Exists(candidate))
-                {
-                    return candidate;
-                }
-            }
-
-            return "TortoiseProc.exe";
         }
     }
 
@@ -380,29 +216,6 @@ namespace SvnChangelistView
             {
                 try { _package.ShowToolWindow(); } catch { }
             };
-
-            // 右键菜单：VS2026 不再合并不受支持的 VSCT 上下文菜单，
-            // 这里用完全可控的 WPF 菜单提供入口（对"解决方案资源管理器当前选中项"生效）。
-            var menu = new ContextMenu();
-            var openItem = new MenuItem
-            {
-                Header = L10n.T("打开 SVN ChangeList View", "Open SVN ChangeList View")
-            };
-            openItem.Click += (s, e) =>
-            {
-                try { _package.ShowToolWindow(); } catch { }
-            };
-            var logItem = new MenuItem
-            {
-                Header = L10n.T("SVN Show Log（当前选中项）", "SVN Show Log (current selection)")
-            };
-            logItem.Click += (s, e) =>
-            {
-                try { _package.ShowLogFromSelection(); } catch { }
-            };
-            menu.Items.Add(openItem);
-            menu.Items.Add(logItem);
-            _pill.ContextMenu = menu;
         }
 
         public void UpdateCounts(int changes, int ignore)
