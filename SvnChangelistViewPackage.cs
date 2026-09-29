@@ -34,6 +34,7 @@ namespace SvnChangelistView
             L10n.Load();
 
             var mcs = await this.GetServiceAsync(typeof(IMenuCommandService)) as OleMenuCommandService;
+            bool showLogAdded = false;
             if (mcs != null)
             {
                 var menuCommandId = new CommandID(new Guid(Guids.CommandSetString), 0x0100);
@@ -67,6 +68,7 @@ namespace SvnChangelistView
                     }
                 };
                 mcs.AddCommand(showLogCommand);
+                showLogAdded = true;
             }
 
             SvnChangelistControl.IgnoreCountChanged += OnIgnoreCountChanged;
@@ -132,6 +134,13 @@ namespace SvnChangelistView
         }
 
         /// <summary>解决方案资源管理器右键"SVN Show Log"：把选中的项目/文件/文件夹路径传给 TortoiseProc 打开日志窗口。</summary>
+        /// <summary>供状态栏徽标右键菜单调用：对当前选中项打开 SVN 日志。</summary>
+        internal void ShowLogFromSelection()
+        {
+            ThreadHelper.ThrowIfNotOnUIThread();
+            ShowLog();
+        }
+
         private void ShowLog()
         {
             ThreadHelper.ThrowIfNotOnUIThread();
@@ -371,6 +380,29 @@ namespace SvnChangelistView
             {
                 try { _package.ShowToolWindow(); } catch { }
             };
+
+            // 右键菜单：VS2026 不再合并不受支持的 VSCT 上下文菜单，
+            // 这里用完全可控的 WPF 菜单提供入口（对"解决方案资源管理器当前选中项"生效）。
+            var menu = new ContextMenu();
+            var openItem = new MenuItem
+            {
+                Header = L10n.T("打开 SVN ChangeList View", "Open SVN ChangeList View")
+            };
+            openItem.Click += (s, e) =>
+            {
+                try { _package.ShowToolWindow(); } catch { }
+            };
+            var logItem = new MenuItem
+            {
+                Header = L10n.T("SVN Show Log（当前选中项）", "SVN Show Log (current selection)")
+            };
+            logItem.Click += (s, e) =>
+            {
+                try { _package.ShowLogFromSelection(); } catch { }
+            };
+            menu.Items.Add(openItem);
+            menu.Items.Add(logItem);
+            _pill.ContextMenu = menu;
         }
 
         public void UpdateCounts(int changes, int ignore)

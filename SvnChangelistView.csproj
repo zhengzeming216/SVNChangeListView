@@ -32,6 +32,9 @@
     <VSCTCompile Include="SvnChangelistView.vsct">
       <ResourceName>Menus.ctmenu</ResourceName>
     </VSCTCompile>
+    <EmbeddedResource Include="Menus-embed.ctmenu">
+      <LogicalName>Menus.ctmenu</LogicalName>
+    </EmbeddedResource>
     <EmbeddedResource Include="SvnChangelistView.ctmenu">
       <LogicalName>VSMenus.ctmenu</LogicalName>
     </EmbeddedResource>

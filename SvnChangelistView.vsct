@@ -13,8 +13,6 @@
         <Parent guid="guidSHLMainMenu" id="IDG_VS_WNDO_OTRWNDWS0" />
       </Group>
       <!-- 解决方案资源管理器右键菜单分组：由下面 CommandPlacement 挂到 项目/文件/文件夹/解决方案 四个上下文菜单 -->
-      <Group guid="guidSvnChangelistViewCmdSet" id="ShowLogGroup" priority="0x0600">
-      </Group>
     </Groups>
 
     <Buttons>
@@ -43,7 +41,7 @@
 
   </Commands>
 
-  <!-- 把 Show Log 分组挂到解决方案资源管理器的四类右键菜单（vsshlids.h 中的 IDM_VS_CTXT_*） -->
+  <!-- 把 Show Log 分组挂到解决方案资源管理器的各类右键菜单（vsshlids.h 中的 IDM_VS_CTXT_*） -->
   <CommandPlacements>
     <CommandPlacement guid="guidSvnChangelistViewCmdSet" id="ShowLogGroup" priority="0x0600">
       <Parent guid="guidSHLMainMenu" id="IDM_VS_CTXT_SOLNNODE" />
