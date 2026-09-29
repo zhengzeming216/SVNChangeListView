@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="utf-8"?>
+<CommandTable xmlns="http://schemas.microsoft.com/VisualStudio/2005-10-18/CommandTable"
+              xmlns:vs="http://schemas.microsoft.com/VisualStudio/2005-10-18/VSShell"
+              xmlns:vsct="http://schemas.microsoft.com/VisualStudio/2008-10/VSCTSchema">
+
+  <Extern href="stdidcmd.h" />
+  <Extern href="vsshlids.h" />
+
+  <Commands package="guidSvnChangelistViewPackage">
+
+    <Groups>
+      <Group guid="guidSvnChangelistViewCmdSet" id="MyMenuGroup" priority="0x0600">
+        <Parent guid="guidSHLMainMenu" id="IDG_VS_WNDO_OTRWNDWS0" />
+      </Group>
+    </Groups>
+
+    <Buttons>
+      <Button guid="guidSvnChangelistViewCmdSet" id="cmdIdSvnChangelistView" priority="0x0100" type="Button">
+        <Parent guid="guidSvnChangelistViewCmdSet" id="MyMenuGroup" />
+        <Strings>
+          <ButtonText>SVN ChangeList View</ButtonText>
+        </Strings>
+      </Button>
+      <Button guid="guidSvnChangelistViewCmdSet" id="cmdIdBadge" priority="0x0200" type="Button">
+        <Parent guid="guidSvnChangelistViewCmdSet" id="MyMenuGroup" />
+        <CommandFlag>TextChanges</CommandFlag>
+        <Strings>
+          <ButtonText>Local-only: 0</ButtonText>
+          <CommandName>SVNChangeListBadge</CommandName>
+        </Strings>
+      </Button>
+    </Buttons>
+
+  </Commands>
+
+  <Symbols>
+    <GuidSymbol name="guidSvnChangelistViewPackage" value="{8a5c2f31-4b7d-4e2a-9c1b-3f6d8a2e5c74}" />
+    <GuidSymbol name="guidSvnChangelistViewCmdSet" value="{9d3f1a47-2e86-4c5b-a1d9-7c4b8e2f6a31}">
+      <IDSymbol name="MyMenuGroup" value="0x1000" />
+      <IDSymbol name="cmdIdSvnChangelistView" value="0x0100" />
+      <IDSymbol name="cmdIdBadge" value="0x0200" />
+    </GuidSymbol>
+  </Symbols>
+
+</CommandTable>
