@@ -18,7 +18,7 @@ namespace SvnChangelistView
 {
     [PackageRegistration(UseManagedResourcesOnly = true, AllowsBackgroundLoading = true)]
     [Guid(Guids.PackageGuidString)]
-    [ProvideMenuResource("Menus.ctmenu", 1)]
+    [ProvideMenuResource("Menus.ctmenu", 2)]
     [ProvideAutoLoad(VSConstants.UICONTEXT.SolutionExists_string, PackageAutoLoadFlags.BackgroundLoad)]
     [ProvideToolWindow(typeof(SvnChangelistWindow))]
     [ProvideToolWindowVisibility(typeof(SvnChangelistWindow), VSConstants.UICONTEXT.SolutionExists_string)]
@@ -49,13 +49,22 @@ namespace SvnChangelistView
                 mcs.AddCommand(_badgeCommand);
 
                 // 解决方案资源管理器右键"SVN Show Log"：调 TortoiseProc 打开日志
+                // 注意：菜单项必须始终 Visible（解析失败只置灰），否则路径解析一旦失败就永久消失
                 var showLogId = new CommandID(new Guid(Guids.CommandSetString), 0x0300);
                 var showLogCommand = new OleMenuCommand((s, e) => ShowLog(), showLogId);
                 showLogCommand.BeforeQueryStatus += (s, e) =>
                 {
                     ThreadHelper.ThrowIfNotOnUIThread();
                     var c = (OleMenuCommand)s;
-                    c.Visible = c.Enabled = GetSelectedPaths().Count > 0;
+                    c.Visible = true;
+                    try
+                    {
+                        c.Enabled = GetSelectedPaths().Count > 0;
+                    }
+                    catch (Exception)
+                    {
+                        c.Enabled = true; // 解析异常时仍可点击，交给 ShowLog 内部处理
+                    }
                 };
                 mcs.AddCommand(showLogCommand);
             }
@@ -213,21 +222,27 @@ namespace SvnChangelistView
                 return;
             }
 
+            string candidate = null;
+
             // 项目/文件项通常能用 GetMkDocument 拿到真实磁盘路径
             if (hier is IVsProject project &&
                 ErrorHandler.Succeeded(project.GetMkDocument(itemId, out string doc)) &&
                 !string.IsNullOrEmpty(doc))
             {
-                paths.Add(doc);
-                return;
+                candidate = doc;
             }
 
-            // 文件夹等回退到 CanonicalName（仅当确实是存在的文件/目录时才采用）
-            if (ErrorHandler.Succeeded(hier.GetCanonicalName(itemId, out string name)) &&
-                !string.IsNullOrEmpty(name) &&
-                (File.Exists(name) || Directory.Exists(name)))
+            // 文件夹/虚拟节点回退到 CanonicalName（不再要求磁盘上存在：CMake/筛选器/NuGet 等虚拟节点也应有入口）
+            if (string.IsNullOrEmpty(candidate) &&
+                ErrorHandler.Succeeded(hier.GetCanonicalName(itemId, out string name)) &&
+                !string.IsNullOrEmpty(name))
             {
-                paths.Add(name);
+                candidate = name;
+            }
+
+            if (!string.IsNullOrEmpty(candidate) && !paths.Contains(candidate))
+            {
+                paths.Add(candidate);
             }
         }
 
