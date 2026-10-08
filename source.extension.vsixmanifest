@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <PackageManifest Version="2.0.0" xmlns="http://schemas.microsoft.com/developer/vsx-schema/2011">
   <Metadata>
-    <Identity Id="SvnChangelistView.6f1c2b90-7a34-4e2e-9c55-1d0a8f4b2e77" Version="1.4.1" Language="zh-CN" Publisher="Marvin" />
+    <Identity Id="SvnChangelistView.6f1c2b90-7a34-4e2e-9c55-1d0a8f4b2e77" Version="1.4.5" Language="zh-CN" Publisher="Marvin" />
     <DisplayName>SVN ChangeList View</DisplayName>
     <Description xml:space="preserve">按 SVN changelist 分组显示：Changes、Changelist "ignore-on-commit"、Unversioned；目录为面包屑式单行折叠。ignore-on-commit 成员用 svn status --cl 单独查询（含未改动成员，可移回），只聚焦解决方案目录。VS 状态栏右下角显示待提交数量徽标，点击打开本窗口。需要 TortoiseSVN 的 svn.exe。</Description>
     <License>LICENSE.txt</License>

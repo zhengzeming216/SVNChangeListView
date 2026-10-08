@@ -23,6 +23,8 @@ namespace SvnChangelistView
     {
         private OleMenuCommand _badgeCommand;
         private StatusBarPillController _pill;
+        private int _lastChanges;
+        private int _lastIgnore;
 
         protected override async Task InitializeAsync(CancellationToken cancellationToken, IProgress<ServiceProgressData> progress)
         {
@@ -63,6 +65,25 @@ namespace SvnChangelistView
 
                     if (_pill.TryAttach())
                     {
+                        // 注入时把已拉到的计数推给徽标（工具窗口可能还没打开过）
+                        _pill.UpdateCounts(_lastChanges, _lastIgnore);
+                        return;
+                    }
+                }
+            });
+
+            // 启动即拉取一次 SVN 计数：让右下角徽标在工具窗口打开前就显示待提交数量。
+            // 工具窗口未打开时不会触发 StartRefresh，所以这里用无 UI 实例的静态方法主动拉一次。
+            _ = this.JoinableTaskFactory.RunAsync(async () =>
+            {
+                for (var i = 0; i < 5; i++)
+                {
+                    await Task.Delay(1500);
+                    await this.JoinableTaskFactory.SwitchToMainThreadAsync(cancellationToken);
+                    var solDir = GetSolutionDir();
+                    if (!string.IsNullOrEmpty(solDir))
+                    {
+                        await SvnChangelistControl.ComputeBadgeCountsAsync(solDir);
                         return;
                     }
                 }
@@ -84,6 +105,8 @@ namespace SvnChangelistView
 
         private void OnCountsChanged(int changes, int ignore)
         {
+            _lastChanges = changes;
+            _lastIgnore = ignore;
             _ = this.JoinableTaskFactory.RunAsync(async () =>
             {
                 await this.JoinableTaskFactory.SwitchToMainThreadAsync();
@@ -106,6 +129,24 @@ namespace SvnChangelistView
             {
                 windowFrame.Show();
             }
+        }
+
+        private string GetSolutionDir()
+        {
+            try
+            {
+                var solution = GetService(typeof(SVsSolution)) as IVsSolution;
+                if (solution != null && ErrorHandler.Succeeded(solution.GetSolutionInfo(out string dir, out _, out _)))
+                {
+                    return dir;
+                }
+            }
+            catch
+            {
+                // ignore
+            }
+
+            return null;
         }
     }
 

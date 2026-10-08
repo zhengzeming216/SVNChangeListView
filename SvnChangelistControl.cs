@@ -634,6 +634,79 @@ namespace SvnChangelistView
             return result;
         }
 
+        /// <summary>
+        /// 无 UI 实例地拉取一次 SVN 计数，供状态栏徽标在工具窗口尚未打开时也能显示待提交数量。
+        /// 复用与 Populate 相同的分组口径：Changes = 未归入任何 changelist 且已版本控制的条目；
+        /// ignore-on-commit = 归入 ignore-on-commit 的条目。结尾会 raise IgnoreCountChanged / CountsChanged，
+        /// 由包内的 StatusBarPillController 接收并更新右下角徽标。
+        /// </summary>
+        public static async System.Threading.Tasks.Task<int[]> ComputeBadgeCountsAsync(string solutionDir)
+        {
+            var svnExe = FindSvnExe();
+            if (svnExe == null || string.IsNullOrWhiteSpace(solutionDir))
+            {
+                IgnoreCountChanged?.Invoke(0);
+                CountsChanged?.Invoke(0, 0);
+                return new[] { 0, 0 };
+            }
+
+            solutionDir = solutionDir.TrimEnd('\\', '/');
+
+            string xml = null, statusError = null;
+            var statusRc = -1;
+            await System.Threading.Tasks.Task.Run(() =>
+                xml = RunSvn(svnExe, "status --xml", solutionDir, out statusError, out statusRc));
+
+            string clXml = null;
+            var clRc = -1;
+            await System.Threading.Tasks.Task.Run(() =>
+                clXml = RunSvn(svnExe, "status --xml --cl " + IgnoreChangelistName, solutionDir, out _, out clRc));
+
+            if (statusRc != 0 || string.IsNullOrWhiteSpace(xml) || !xml.Contains("<status"))
+            {
+                IgnoreCountChanged?.Invoke(0);
+                CountsChanged?.Invoke(0, 0);
+                return new[] { 0, 0 };
+            }
+
+            var files = ParseStatusXml(xml, solutionDir);
+            var clFiles = ParseChangelistXml(clXml, solutionDir, IgnoreChangelistName);
+
+            var byPath = new Dictionary<string, FileEntry>(StringComparer.OrdinalIgnoreCase);
+            foreach (var f in files)
+            {
+                byPath[NormalizeRelPath(f.RelativePath)] = f;
+            }
+
+            foreach (var f in clFiles)
+            {
+                byPath[NormalizeRelPath(f.RelativePath)] = f;
+            }
+
+            var changes = 0;
+            var ignore = 0;
+            foreach (var f in byPath.Values)
+            {
+                if (f.Unversioned)
+                {
+                    continue;
+                }
+
+                if (string.Equals(f.Changelist, IgnoreChangelistName, StringComparison.OrdinalIgnoreCase))
+                {
+                    ignore++;
+                }
+                else if (f.Changelist == null)
+                {
+                    changes++;
+                }
+            }
+
+            IgnoreCountChanged?.Invoke(ignore);
+            CountsChanged?.Invoke(changes, ignore);
+            return new[] { changes, ignore };
+        }
+
         // ---------- 树形展示 ----------
 
         private Dictionary<string, bool> CaptureExpandedState()
