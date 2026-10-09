@@ -22,28 +22,10 @@ def vgrad(draw, box, c_top, c_bot):
         b = int(c_top[2] + (c_bot[2] - c_top[2]) * t)
         draw.line([(x0, y), (x1, y)], fill=(r, g, b))
 
-# ---------------- Icon 128x128 ----------------
-S = 128
-img = Image.new("RGBA", (S, S), (0, 0, 0, 0))
-d = ImageDraw.Draw(img)
-# rounded square background with vertical gradient
-d.rounded_rectangle([4, 4, S - 4, S - 4], radius=28, fill=(31, 78, 121, 255))
-# overlay subtle top sheen
-vgrad(d, [4, 4, S - 4, S - 4], (58, 110, 165, 255), (31, 78, 121, 255))
-# list lines (left)
-ly = [46, 66, 86]
-for y in ly:
-    d.rounded_rectangle([30, y, 66, y + 7], radius=3, fill=(255, 255, 255, 235))
-# checkmark (right)
-def chk(cx0, cy0, cx1, cy1, cx2, cy2, w, col):
-    d.line([(cx0, cy0), (cx1, cy1)], fill=col, width=w, joint="curve")
-    d.line([(cx1, cy1), (cx2, cy2)], fill=col, width=w, joint="curve")
-    # round the joints
-    for (px, py) in [(cx0, cy0), (cx1, cy1), (cx2, cy2)]:
-        d.ellipse([px - w / 2, py - w / 2, px + w / 2, py + w / 2], fill=col)
-chk(76, 60, 88, 74, 102, 48, 11, (120, 220, 150, 255))
-img.save("C:/Users/station167/WorkBuddy/2026-09-24-17-19-59/SvnChangelistView/Resources/Icon.png")
-print("Icon.png written", img.size)
+# ---------------- Icon ----------------
+# Icon.png / Icon-256.png 已改由 ../make_icon_from_image.py 从原图生成
+# （会自动补 22% 圆角蒙版并让圆角外透明）。此处不再生成图标，避免覆盖新图。
+# 本脚本现在只负责 Preview.png（扩展管理器横幅）。
 
 # ---------------- Preview 1280x800 ----------------
 W, H = 1280, 800
