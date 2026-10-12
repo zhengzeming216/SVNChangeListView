@@ -7,6 +7,7 @@ using System.Linq;
 using System.Text;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Controls.Primitives;
 using System.Windows.Data;
 using System.Windows.Input;
 using System.Windows.Media;
@@ -88,7 +89,6 @@ namespace SvnChangelistView
         private readonly Button _commitButton;
         private readonly Button _updateButton;
         private readonly CheckBox _autoRefreshBox;
-        private readonly Button _langButton;
         private readonly DispatcherTimer _timer;
 
         private uint _solutionEventsCookie;
@@ -111,7 +111,6 @@ namespace SvnChangelistView
         public SvnChangelistControl(SvnChangelistWindow window)
         {
             _window = window;
-            L10n.Load();
 
             _refreshButton = MakeButton("刷新", "Refresh", (s, e) => StartRefresh());
             _commitButton = MakeButton("提交…", "Commit…", (s, e) => OpenTortoise("commit", null));
@@ -127,9 +126,6 @@ namespace SvnChangelistView
             };
             _autoRefreshBox.Click += (s, e) => ApplyLanguage();
 
-            _langButton = MakeButton("EN", "EN", (s, e) => ToggleLanguage());
-            ToolTipService.SetToolTip(_langButton, L10n.T("切换为英文", "Switch to Chinese"));
-
             _statusText = new TextBlock
             {
                 VerticalAlignment = VerticalAlignment.Center,
@@ -143,7 +139,6 @@ namespace SvnChangelistView
             header.Children.Add(_commitButton);
             header.Children.Add(_updateButton);
             header.Children.Add(_autoRefreshBox);
-            header.Children.Add(_langButton);
             header.Children.Add(_statusText);
 
             _tree = new TreeView
@@ -197,17 +192,9 @@ namespace SvnChangelistView
             _commitButton.Content = L10n.T("提交…", "Commit…");
             _updateButton.Content = L10n.T("更新", "Update");
             _autoRefreshBox.Content = L10n.T("自动刷新", "Auto refresh");
-            _langButton.Content = L10n.Lang == "en" ? "中文" : "EN";
             ToolTipService.SetToolTip(_autoRefreshBox, L10n.T("每 10 秒自动刷新一次 SVN 状态", "Refresh SVN status every 10 seconds"));
             UpdateCaption();
             RepopulateFromCache();
-        }
-
-        private void ToggleLanguage()
-        {
-            L10n.Lang = L10n.Lang == "zh" ? "en" : "zh";
-            L10n.Save();
-            ApplyLanguage();
         }
 
         private void UpdateCaption()
@@ -709,36 +696,14 @@ namespace SvnChangelistView
 
         // ---------- 树形展示 ----------
 
-        private Dictionary<string, bool> CaptureExpandedState()
+        /// <summary>没有历史记录时的默认展开状态：只有 Changes 展开，其余（ignore-on-commit、未版本控制、自定义 changelist）折叠。</summary>
+        private static bool IsExpandedByDefault(string kind)
         {
-            var d = new Dictionary<string, bool>();
-            foreach (TreeViewItem node in _tree.Items)
-            {
-                CaptureExpandedState(node, d);
-            }
-
-            return d;
-        }
-
-        private static void CaptureExpandedState(TreeViewItem node, Dictionary<string, bool> d)
-        {
-            // 只有顶级分组（GroupEntry）可折叠，文件夹行不可折叠，无需记录其状态
-            var group = (node.Header as FrameworkElement)?.DataContext as GroupEntry;
-            if (group != null)
-            {
-                d[group.Kind] = node.IsExpanded;
-            }
-
-            foreach (TreeViewItem child in node.Items)
-            {
-                CaptureExpandedState(child, d);
-            }
+            return string.Equals(kind, GroupKinds.Changes, StringComparison.OrdinalIgnoreCase);
         }
 
         private void Populate(string workingCopyRoot, List<FileEntry> files, bool refreshStatus = true)
         {
-            var expanded = CaptureExpandedState();
-
             _lastRoot = workingCopyRoot;
             _currentFiles = files ?? new List<FileEntry>();
             _selected.Clear();
@@ -815,14 +780,9 @@ namespace SvnChangelistView
 
             foreach (var group in ordered)
             {
-                var node = CreateGroupNode(group, expanded);
-                bool isOpen;
-                if (!expanded.TryGetValue(group.Kind, out isOpen))
-                {
-                    isOpen = true;
-                }
-
-                node.IsExpanded = isOpen;
+                var node = CreateGroupNode(group);
+                // 展开状态：优先用上次记录的值（跨 VS 会话保留）；没有记录时 Changes 默认展开，其余默认折叠
+                node.IsExpanded = ViewState.GetExpanded(group.Kind) ?? IsExpandedByDefault(group.Kind);
                 _tree.Items.Add(node);
             }
 
@@ -839,7 +799,7 @@ namespace SvnChangelistView
             }
         }
 
-        private TreeViewItem CreateGroupNode(GroupEntry group, Dictionary<string, bool> expanded)
+        private TreeViewItem CreateGroupNode(GroupEntry group)
         {
             var isIgnore = string.Equals(group.Kind, GroupKinds.Changelist(IgnoreChangelistName), StringComparison.OrdinalIgnoreCase);
 
@@ -884,9 +844,16 @@ namespace SvnChangelistView
 
             var node = new TreeViewItem
             {
-                Header = headerPanel
+                Header = headerPanel,
+                Background = Brushes.Transparent,
+                // 自定义模板：不含背景边框，悬停/点击外观不变（只有左侧箭头负责折叠）
+                Template = GroupRowTemplate
             };
             SoftenSelectionHighlight(node);
+
+            // 记录展开/折叠，跨 VS 会话保留
+            node.Expanded += (s, e) => ViewState.SetExpanded(group.Kind, true);
+            node.Collapsed += (s, e) => ViewState.SetExpanded(group.Kind, false);
 
             // 仿 VisualSVN Pending Changes：只有顶级分组可折叠。
             // 含文件的目录输出一行不可折叠的面包屑行（全路径），文件挂在该行下；
@@ -957,6 +924,77 @@ namespace SvnChangelistView
             }
 
             return node;
+        }
+
+        /// <summary>展开箭头模板：小三角，展开时转为向下；无背景/悬停效果。</summary>
+        private static readonly ControlTemplate ExpanderTemplate = CreateExpanderTemplate();
+
+        private static ControlTemplate CreateExpanderTemplate()
+        {
+            var template = new ControlTemplate(typeof(ToggleButton));
+            var arrow = new FrameworkElementFactory(typeof(System.Windows.Shapes.Path), "Arrow");
+            arrow.SetValue(System.Windows.Shapes.Path.DataProperty, Geometry.Parse("M 0,1 L 5,5 L 0,9 Z"));
+            arrow.SetValue(System.Windows.Shapes.Shape.FillProperty, Brushes.Gray);
+            arrow.SetValue(FrameworkElement.HorizontalAlignmentProperty, HorizontalAlignment.Center);
+            arrow.SetValue(FrameworkElement.VerticalAlignmentProperty, VerticalAlignment.Center);
+            template.VisualTree = arrow;
+
+            var expanded = new Trigger { Property = ToggleButton.IsCheckedProperty, Value = true };
+            expanded.Setters.Add(new Setter(System.Windows.Shapes.Path.DataProperty,
+                Geometry.Parse("M 1,0 L 9,0 L 5,5 Z"), "Arrow"));
+            template.Triggers.Add(expanded);
+
+            return template;
+        }
+
+        /// <summary>分组行模板：左侧展开箭头 + 头部 + 子项；不含背景边框，所以悬停/点击外观不变。</summary>
+        private static readonly ControlTemplate GroupRowTemplate = CreateGroupRowTemplate();
+
+        private static ControlTemplate CreateGroupRowTemplate()
+        {
+            var template = new ControlTemplate(typeof(TreeViewItem));
+
+            var dock = new FrameworkElementFactory(typeof(DockPanel));
+            dock.SetValue(DockPanel.LastChildFillProperty, true);
+
+            var expander = new FrameworkElementFactory(typeof(ToggleButton), "Expander");
+            expander.SetValue(DockPanel.DockProperty, Dock.Left);
+            expander.SetValue(FrameworkElement.WidthProperty, 14.0);
+            expander.SetValue(FrameworkElement.FocusableProperty, false);
+            // 必须顶端对齐：展开后 DockPanel 会变高，若居中箭头会落到整块的垂直中间（看起来“飘走”）
+            expander.SetValue(FrameworkElement.VerticalAlignmentProperty, VerticalAlignment.Top);
+            expander.SetValue(FrameworkElement.MarginProperty, new Thickness(4, 3, 2, 0));
+            expander.SetValue(ButtonBase.ClickModeProperty, ClickMode.Press);
+            expander.SetBinding(ToggleButton.IsCheckedProperty, new Binding("IsExpanded")
+            {
+                RelativeSource = new RelativeSource(RelativeSourceMode.TemplatedParent),
+                Mode = BindingMode.TwoWay
+            });
+            expander.SetValue(Control.TemplateProperty, ExpanderTemplate);
+            dock.AppendChild(expander);
+
+            var stack = new FrameworkElementFactory(typeof(StackPanel));
+            stack.SetValue(StackPanel.OrientationProperty, Orientation.Vertical);
+
+            var header = new FrameworkElementFactory(typeof(ContentPresenter));
+            header.SetBinding(ContentPresenter.ContentProperty, new Binding("Header")
+            {
+                RelativeSource = new RelativeSource(RelativeSourceMode.TemplatedParent)
+            });
+            stack.AppendChild(header);
+
+            var items = new FrameworkElementFactory(typeof(ItemsPresenter), "ItemsHost");
+            items.SetValue(FrameworkElement.MarginProperty, new Thickness(2, 0, 0, 0));
+            stack.AppendChild(items);
+
+            dock.AppendChild(stack);
+            template.VisualTree = dock;
+
+            var collapsed = new Trigger { Property = TreeViewItem.IsExpandedProperty, Value = false };
+            collapsed.Setters.Add(new Setter(FrameworkElement.VisibilityProperty, Visibility.Collapsed, "ItemsHost"));
+            template.Triggers.Add(collapsed);
+
+            return template;
         }
 
         /// <summary>文件夹行的精简模板：头部 + 子项（固定缩进），没有展开箭头因此无法折叠。</summary>

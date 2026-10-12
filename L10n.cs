@@ -1,55 +1,65 @@
 using System;
-using System.IO;
-using System.Linq;
+using System.Globalization;
+using Microsoft.VisualStudio.Shell.Interop;
 
 namespace SvnChangelistView
 {
-    /// <summary>轻量双语支持 + 语言设置持久化（%LocalAppData%\SvnChangelistView\settings.ini）。</summary>
+    /// <summary>
+    /// 轻量双语支持。语言跟随 Visual Studio 的环境语言设置
+    /// （工具 → 选项 → 环境 → 国际设置），不再由插件内部手动切换。
+    /// </summary>
     internal static class L10n
     {
-        public static string Lang = "zh"; // "zh" | "en"
+        private static string _lang;
 
-        private static string SettingsPath
+        /// <summary>"zh" | "en"。未显式初始化时按当前 UI 区域性推断。</summary>
+        public static string Lang
         {
-            get
-            {
-                return Path.Combine(
-                    Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-                    "SvnChangelistView", "settings.ini");
-            }
+            get { return _lang ?? (_lang = DetectFromCulture()); }
         }
 
-        public static void Load()
+        /// <summary>
+        /// 读取 VS 的 UI 语言（IUIHostLocale.GetUILocale）；取不到时退回当前 UI 区域性。
+        /// 应在包初始化（主线程）时调用一次。
+        /// </summary>
+        public static void Initialize(IServiceProvider serviceProvider)
         {
             try
             {
-                if (File.Exists(SettingsPath))
+                if (serviceProvider != null)
                 {
-                    var line = File.ReadAllLines(SettingsPath)
-                        .FirstOrDefault(l => l.StartsWith("lang=", StringComparison.OrdinalIgnoreCase));
-                    if (line != null && line.Substring(5).Trim().Equals("en", StringComparison.OrdinalIgnoreCase))
+                    var hostLocale = serviceProvider.GetService(typeof(SUIHostLocale)) as IUIHostLocale;
+                    uint lcid;
+                    if (hostLocale != null && hostLocale.GetUILocale(out lcid) == 0 && lcid != 0)
                     {
-                        Lang = "en";
+                        _lang = FromTwoLetter(new CultureInfo((int)lcid).TwoLetterISOLanguageName);
+                        return;
                     }
                 }
             }
             catch
             {
-                // 读取失败用默认中文
+                // 忽略，退回区域性判断
             }
+
+            _lang = DetectFromCulture();
         }
 
-        public static void Save()
+        private static string DetectFromCulture()
         {
             try
             {
-                Directory.CreateDirectory(Path.GetDirectoryName(SettingsPath));
-                File.WriteAllText(SettingsPath, "lang=" + Lang + Environment.NewLine);
+                return FromTwoLetter(CultureInfo.CurrentUICulture.TwoLetterISOLanguageName);
             }
             catch
             {
-                // 写失败不影响功能
+                return "zh";
             }
+        }
+
+        private static string FromTwoLetter(string two)
+        {
+            return string.Equals(two, "zh", StringComparison.OrdinalIgnoreCase) ? "zh" : "en";
         }
 
         public static string T(string zh, string en)

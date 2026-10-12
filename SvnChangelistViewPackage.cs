@@ -30,7 +30,7 @@ namespace SvnChangelistView
         {
             await this.JoinableTaskFactory.SwitchToMainThreadAsync(cancellationToken);
 
-            L10n.Load();
+            L10n.Initialize(this);
 
             var mcs = await this.GetServiceAsync(typeof(IMenuCommandService)) as OleMenuCommandService;
             if (mcs != null)
