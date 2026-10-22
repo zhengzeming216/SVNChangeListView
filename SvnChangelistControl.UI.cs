@@ -312,7 +312,7 @@ namespace SvnChangelistView
             count.Margin = new Thickness(8, 0, 10, 0);
             Grid.SetColumn(count, 4);
             header.Children.Add(count);
-            var border = new Border { Height = 23, Background = Brushes.Transparent, DataContext = folder, Child = header };
+            var border = new Border { Height = 23, Background = Brushes.Transparent, BorderThickness = new Thickness(0), DataContext = folder, Child = header };
             node.Header = border;
             foreach (var file in folder.Files.OrderBy(f => f.RelativePath, StringComparer.OrdinalIgnoreCase))
                 node.Items.Add(CreateFileNode(file, inIgnoreGroup));
@@ -358,7 +358,7 @@ namespace SvnChangelistView
             var border = new Border
             {
                 Height = 23, Background = Brushes.Transparent, BorderBrush = Brushes.Transparent,
-                BorderThickness = new Thickness(1), DataContext = file, Child = header
+                BorderThickness = new Thickness(0), DataContext = file, Child = header
             };
             border.ToolTip = file.FullPath + (file.DirtyOnly ? L10n.T("（有未保存的修改）", " (unsaved changes)") : "");
             var node = MakeUiNode(file);

@@ -1071,8 +1071,8 @@ namespace SvnChangelistView
                 var selected = _selected.Contains(kv.Key);
                 kv.Value.Background = selected ? background : Brushes.Transparent;
                 if (selected) kv.Value.BorderBrush = outline;
-                else kv.Value.SetResourceReference(Border.BorderBrushProperty, EnvironmentColors.ToolWindowBorderBrushKey);
-                kv.Value.BorderThickness = selected ? new Thickness(1) : new Thickness(0, 0, 0, 1);
+                else kv.Value.BorderBrush = Brushes.Transparent;
+                kv.Value.BorderThickness = selected ? new Thickness(1) : new Thickness(0);
             }
             foreach (var text in _rowTexts.Values)
             {
