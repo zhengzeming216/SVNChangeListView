@@ -39,7 +39,8 @@ namespace SvnChangelistView
         private int _summaryUnversioned;
         private int _summaryCustom;
         private bool _hasUiSummary;
-        private static readonly ControlTemplate UiRowTemplate = CreateUiRowTemplate();
+        private static readonly ControlTemplate UiRowTemplate = CreateUiRowTemplate(false);
+        private static readonly ControlTemplate UiFolderRowTemplate = CreateUiRowTemplate(true);
         private static readonly ControlTemplate UiExpanderTemplate = CreateUiExpanderTemplate();
         private static readonly ControlTemplate UiButtonTemplate = CreateUiButtonTemplate();
 
@@ -285,6 +286,7 @@ namespace SvnChangelistView
         private TreeViewItem CreateFolderRow(FolderEntry folder, bool inIgnoreGroup, string kind)
         {
             var node = MakeUiNode(folder);
+            node.Template = UiFolderRowTemplate;
             node.Tag = kind;
             // 目录行只是分组标签，不提供折叠交互；仅顶层三类主分组可折叠。
             var header = MakeUiColumns(40, 22, 20, double.NaN, double.NaN);
@@ -658,7 +660,7 @@ namespace SvnChangelistView
             return template;
         }
 
-        private static ControlTemplate CreateUiRowTemplate()
+        private static ControlTemplate CreateUiRowTemplate(bool indentChildren)
         {
             var template = new ControlTemplate(typeof(TreeViewItem));
             var stack = new FrameworkElementFactory(typeof(StackPanel));
@@ -668,8 +670,8 @@ namespace SvnChangelistView
             header.SetValue(HorizontalAlignmentProperty, HorizontalAlignment.Stretch);
             stack.AppendChild(header);
             var items = new FrameworkElementFactory(typeof(ItemsPresenter), "UiItemsHost");
-            // 每层子树向右缩进一个 tab，目录与文件层级更清楚。
-            items.SetValue(MarginProperty, new Thickness(20, 0, 0, 0));
+            // 仅文件夹的子树（文件行）增加一个 tab；主分组下的目录不额外缩进。
+            items.SetValue(MarginProperty, indentChildren ? new Thickness(20, 0, 0, 0) : new Thickness(0));
             items.SetValue(HorizontalAlignmentProperty, HorizontalAlignment.Stretch);
             stack.AppendChild(items);
             template.VisualTree = stack;
