@@ -286,11 +286,8 @@ namespace SvnChangelistView
         {
             var node = MakeUiNode(folder);
             node.Tag = kind;
+            // 目录行只是分组标签，不提供折叠交互；仅顶层三类主分组可折叠。
             var header = MakeUiColumns(40, 22, 20, double.NaN, double.NaN);
-            var expander = MakeUiExpander(node, 16);
-            expander.HorizontalAlignment = HorizontalAlignment.Right;
-            Grid.SetColumn(expander, 0);
-            header.Children.Add(expander);
             if (!inIgnoreGroup)
             {
                 var check = MakeAggregateCheckBox(folder.Files);
@@ -316,7 +313,8 @@ namespace SvnChangelistView
             node.Header = border;
             foreach (var file in folder.Files.OrderBy(f => f.RelativePath, StringComparer.OrdinalIgnoreCase))
                 node.Items.Add(CreateFileNode(file, inIgnoreGroup));
-            RememberUiExpansion(node, kind, relative, true);
+            // 文件夹永远展开，折叠/展开只作用于 Changes、ignore-on-commit、Unversioned 顶层组。
+            node.IsExpanded = true;
             return node;
         }
 

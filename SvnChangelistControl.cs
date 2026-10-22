@@ -1151,6 +1151,17 @@ namespace SvnChangelistView
         {
             if (e.Key != Key.Up && e.Key != Key.Down && e.Key != Key.Left && e.Key != Key.Right &&
                 e.Key != Key.Home && e.Key != Key.End && e.Key != Key.PageUp && e.Key != Key.PageDown) return;
+            // 文件夹行只用于分组展示，不允许通过键盘收起；仅三个顶层组可折叠。
+            if ((e.Key == Key.Left || e.Key == Key.Right) && GetSelectedFile() == null)
+            {
+                var focusedNode = FindAncestor<TreeViewItem>(Keyboard.FocusedElement as DependencyObject) ?? _tree.SelectedItem as TreeViewItem;
+                if (focusedNode?.DataContext is FolderEntry)
+                {
+                    focusedNode.IsExpanded = true;
+                    e.Handled = true;
+                    return;
+                }
+            }
             var generation = _populateGeneration;
             Dispatcher.BeginInvoke(DispatcherPriority.Input, new Action(() =>
             {
@@ -1390,7 +1401,7 @@ namespace SvnChangelistView
             var group = data as GroupEntry;
             var folder = data as FolderEntry;
 
-            var menu = new ContextMenu();
+            var menu = CreateStyledContextMenu();
 
             if (file != null)
             {
@@ -1500,6 +1511,48 @@ namespace SvnChangelistView
                 menu.Placement = PlacementMode.Bottom;
             }
             _tree.ContextMenu = menu;
+        }
+
+        private static ContextMenu CreateStyledContextMenu()
+        {
+            var menu = new ContextMenu
+            {
+                MinWidth = 252,
+                MaxWidth = 340,
+                Padding = new Thickness(0, 4, 0, 4),
+                Background = new SolidColorBrush(Color.FromRgb(0xF7, 0xF7, 0xF7)),
+                BorderBrush = new SolidColorBrush(Color.FromRgb(0xAE, 0xB0, 0xB7)),
+                BorderThickness = new Thickness(1),
+                HasDropShadow = false,
+                Effect = new System.Windows.Media.Effects.DropShadowEffect
+                {
+                    Color = Colors.Black,
+                    Direction = 315,
+                    ShadowDepth = 1,
+                    BlurRadius = 4,
+                    Opacity = 0.18
+                }
+            };
+            var itemStyle = new Style(typeof(MenuItem));
+            itemStyle.Setters.Add(new Setter(Control.MinHeightProperty, 26.0));
+            itemStyle.Setters.Add(new Setter(Control.FontSizeProperty, 12.0));
+            itemStyle.Setters.Add(new Setter(Control.PaddingProperty, new Thickness(31, 4, 12, 4)));
+            itemStyle.Setters.Add(new Setter(Control.HorizontalContentAlignmentProperty, HorizontalAlignment.Left));
+            itemStyle.Setters.Add(new Setter(Control.BackgroundProperty, Brushes.Transparent));
+            itemStyle.Setters.Add(new Setter(Control.BorderThicknessProperty, new Thickness(0)));
+            var hover = new Trigger { Property = MenuItem.IsHighlightedProperty, Value = true };
+            hover.Setters.Add(new Setter(Control.BackgroundProperty, new SolidColorBrush(Color.FromRgb(0xE2, 0xEA, 0xF4))));
+            hover.Setters.Add(new Setter(Control.BorderBrushProperty, Brushes.Transparent));
+            itemStyle.Triggers.Add(hover);
+            menu.Resources.Add(typeof(MenuItem), itemStyle);
+
+            var separatorStyle = new Style(typeof(Separator));
+            separatorStyle.Setters.Add(new Setter(FrameworkElement.HeightProperty, 1.0));
+            separatorStyle.Setters.Add(new Setter(FrameworkElement.MarginProperty, new Thickness(29, 4, 0, 4)));
+            separatorStyle.Setters.Add(new Setter(Control.BackgroundProperty, new SolidColorBrush(Color.FromRgb(0xD6, 0xD6, 0xDC))));
+            separatorStyle.Setters.Add(new Setter(Control.BorderThicknessProperty, new Thickness(0)));
+            menu.Resources.Add(typeof(Separator), separatorStyle);
+            return menu;
         }
 
         private MenuItem MakeItem(string header, Action action)

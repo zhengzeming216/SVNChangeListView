@@ -368,7 +368,7 @@ namespace SvnChangelistView
         private readonly SvnChangelistViewPackage _package;
         private Panel _panel;
         private Border _pill;
-        private TextBlock _icon;
+        private System.Windows.Shapes.Path _icon;
         private TextBlock _text;
         private Color _statusBarColor = Color.FromRgb(0x00, 0x00, 0x00);
         private bool _hasStatusBarColor;
@@ -430,20 +430,23 @@ namespace SvnChangelistView
 
         private void BuildPill()
         {
-            // 小图标：系统图标字体的对勾（Segoe Fluent Icons 优先，老系统回退 Segoe MDL2 Assets）
-            _icon = new TextBlock
+            // 设计稿中的“文档 + 铅笔”线性入口图标。
+            _icon = new System.Windows.Shapes.Path
             {
-                Text = "\uE73E",
-                FontFamily = new FontFamily("Segoe Fluent Icons, Segoe MDL2 Assets"),
-                FontSize = 11,
+                Data = Geometry.Parse("M 2.5,2 L 8.5,2 L 11,4.7 L 11,6.7 M 2.5,2 L 2.5,14 L 7.5,14 M 8,4.7 L 11,4.7 M 8,7.2 L 9,7.2 M 6.8,11.2 L 11.6,6.4 L 13.6,8.4 L 8.8,13.2 L 6.3,13.7 Z"),
+                Width = 15,
+                Height = 15,
+                Stretch = Stretch.Uniform,
+                StrokeThickness = 1.1,
+                StrokeLineJoin = PenLineJoin.Round,
                 VerticalAlignment = VerticalAlignment.Center,
-                Margin = new Thickness(0, 0, 3, 0)
+                Margin = new Thickness(0, 0, 5, 0)
             };
 
             _text = new TextBlock
             {
-                FontWeight = FontWeights.SemiBold,
-                FontSize = 11,
+                FontWeight = FontWeights.Normal,
+                FontSize = 12,
                 VerticalAlignment = VerticalAlignment.Center
             };
 
@@ -454,14 +457,23 @@ namespace SvnChangelistView
             _pill = new Border
             {
                 Child = content,
-                CornerRadius = new CornerRadius(9),
-                Padding = new Thickness(8, 1, 8, 1),
-                Margin = new Thickness(2, 1, 6, 1),
+                CornerRadius = new CornerRadius(0),
+                Padding = new Thickness(9, 0, 9, 0),
+                Margin = new Thickness(0),
+                Height = 27,
                 VerticalAlignment = VerticalAlignment.Center,
                 HorizontalAlignment = HorizontalAlignment.Left,
                 Cursor = Cursors.Hand,
                 Visibility = Visibility.Collapsed
             };
+            _pill.MouseEnter += (s, e) =>
+            {
+                var darkBar = (_statusBarColor.R * 0.299 + _statusBarColor.G * 0.587 + _statusBarColor.B * 0.114) <= 186;
+                _pill.Background = new SolidColorBrush(darkBar
+                    ? Color.FromArgb(0x30, 0xFF, 0xFF, 0xFF)
+                    : Color.FromArgb(0x18, 0x00, 0x00, 0x00));
+            };
+            _pill.MouseLeave += (s, e) => ApplyTheme();
             _pill.MouseLeftButtonDown += (s, e) =>
             {
                 try { _package.ShowToolWindow(); } catch { }
@@ -512,12 +524,12 @@ namespace SvnChangelistView
             if (dark)
             {
                 _text.Foreground = Brushes.White;
-                _icon.Foreground = new SolidColorBrush(Color.FromRgb(0x8A, 0xD3, 0x5F));
+                _icon.Stroke = Brushes.White;
             }
             else
             {
                 _text.Foreground = new SolidColorBrush(Color.FromRgb(0x1E, 0x1E, 0x1E));
-                _icon.Foreground = new SolidColorBrush(Color.FromRgb(0x1A, 0x7F, 0x37));
+                _icon.Stroke = new SolidColorBrush(Color.FromRgb(0x1E, 0x1E, 0x1E));
             }
         }
 
