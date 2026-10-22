@@ -1538,12 +1538,13 @@ namespace SvnChangelistView
         {
             var menu = new ContextMenu
             {
-                MinWidth = 252,
-                MaxWidth = 440,
-                Padding = new Thickness(0, 4, 0, 4),
+                MinWidth = 258,
+                MaxWidth = 360,
+                Padding = new Thickness(0, 2, 0, 2),
                 Background = new SolidColorBrush(Color.FromRgb(0xF7, 0xF7, 0xF7)),
-                BorderBrush = new SolidColorBrush(Color.FromRgb(0xAE, 0xB0, 0xB7)),
+                BorderBrush = new SolidColorBrush(Color.FromRgb(0x85, 0x85, 0x8D)),
                 BorderThickness = new Thickness(1),
+                Foreground = new SolidColorBrush(Color.FromRgb(0x25, 0x25, 0x2B)),
                 HasDropShadow = false,
                 Effect = new System.Windows.Media.Effects.DropShadowEffect
                 {
@@ -1561,6 +1562,8 @@ namespace SvnChangelistView
             menuBorder.SetBinding(Border.BackgroundProperty, new Binding("Background") { RelativeSource = RelativeSource.TemplatedParent });
             menuBorder.SetBinding(Border.BorderBrushProperty, new Binding("BorderBrush") { RelativeSource = RelativeSource.TemplatedParent });
             menuBorder.SetBinding(Border.BorderThicknessProperty, new Binding("BorderThickness") { RelativeSource = RelativeSource.TemplatedParent });
+            menuBorder.SetValue(Border.CornerRadiusProperty, new CornerRadius(4));
+            menuBorder.SetValue(UIElement.ClipToBoundsProperty, true);
             var menuScroll = new FrameworkElementFactory(typeof(ScrollViewer));
             menuScroll.SetValue(ScrollViewer.CanContentScrollProperty, true);
             menuScroll.SetValue(ScrollViewer.HorizontalScrollBarVisibilityProperty, ScrollBarVisibility.Disabled);
@@ -1575,14 +1578,30 @@ namespace SvnChangelistView
             var itemTemplate = new ControlTemplate(typeof(MenuItem));
             var itemBorder = new FrameworkElementFactory(typeof(Border), "MenuItemBorder");
             itemBorder.SetValue(Border.BackgroundProperty, Brushes.Transparent);
-            itemBorder.SetValue(Border.PaddingProperty, new Thickness(12, 4, 12, 4));
+            itemBorder.SetValue(Border.PaddingProperty, new Thickness(8, 3, 10, 3));
+            var itemGrid = new FrameworkElementFactory(typeof(Grid));
+            var iconColumn = new FrameworkElementFactory(typeof(ColumnDefinition));
+            iconColumn.SetValue(ColumnDefinition.WidthProperty, new GridLength(22));
+            var textColumn = new FrameworkElementFactory(typeof(ColumnDefinition));
+            textColumn.SetValue(ColumnDefinition.WidthProperty, new GridLength(1, GridUnitType.Star));
+            itemGrid.AppendChild(iconColumn);
+            itemGrid.AppendChild(textColumn);
+            var iconPresenter = new FrameworkElementFactory(typeof(ContentPresenter));
+            iconPresenter.SetValue(Grid.ColumnProperty, 0);
+            iconPresenter.SetBinding(ContentPresenter.ContentProperty, new Binding("Tag") { RelativeSource = RelativeSource.TemplatedParent });
+            iconPresenter.SetValue(HorizontalAlignmentProperty, HorizontalAlignment.Center);
+            iconPresenter.SetValue(VerticalAlignmentProperty, VerticalAlignment.Center);
+            itemGrid.AppendChild(iconPresenter);
             var itemContent = new FrameworkElementFactory(typeof(ContentPresenter));
+            itemContent.SetValue(Grid.ColumnProperty, 1);
             itemContent.SetBinding(ContentPresenter.ContentProperty, new Binding("Header") { RelativeSource = RelativeSource.TemplatedParent });
             itemContent.SetBinding(ContentPresenter.ContentTemplateProperty, new Binding("HeaderTemplate") { RelativeSource = RelativeSource.TemplatedParent });
             itemContent.SetValue(ContentPresenter.RecognizesAccessKeyProperty, true);
             itemContent.SetValue(HorizontalAlignmentProperty, HorizontalAlignment.Left);
-            itemContent.SetValue(FrameworkElement.MaxWidthProperty, 414.0);
-            itemBorder.AppendChild(itemContent);
+            itemContent.SetValue(VerticalAlignmentProperty, VerticalAlignment.Center);
+            itemContent.SetValue(FrameworkElement.MaxWidthProperty, 330.0);
+            itemGrid.AppendChild(itemContent);
+            itemBorder.AppendChild(itemGrid);
             itemTemplate.VisualTree = itemBorder;
             var hover = new Trigger { Property = MenuItem.IsHighlightedProperty, Value = true };
             hover.Setters.Add(new Setter(Border.BackgroundProperty, new SolidColorBrush(Color.FromRgb(0xE2, 0xEA, 0xF4)), "MenuItemBorder"));
@@ -1604,8 +1623,8 @@ namespace SvnChangelistView
             var separatorTemplate = new ControlTemplate(typeof(Separator));
             var separatorLine = new FrameworkElementFactory(typeof(Border));
             separatorLine.SetValue(FrameworkElement.HeightProperty, 1.0);
-            separatorLine.SetValue(FrameworkElement.MarginProperty, new Thickness(12, 4, 0, 4));
-            separatorLine.SetValue(Border.BackgroundProperty, new SolidColorBrush(Color.FromRgb(0xD6, 0xD6, 0xDC)));
+            separatorLine.SetValue(FrameworkElement.MarginProperty, new Thickness(30, 3, 0, 3));
+            separatorLine.SetValue(Border.BackgroundProperty, new SolidColorBrush(Color.FromRgb(0xD1, 0xD1, 0xD6)));
             separatorTemplate.VisualTree = separatorLine;
             var separatorStyle = new Style(typeof(Separator));
             separatorStyle.Setters.Add(new Setter(Control.TemplateProperty, separatorTemplate));
@@ -1618,13 +1637,53 @@ namespace SvnChangelistView
             var headerText = new TextBlock
             {
                 Text = header,
-                TextWrapping = TextWrapping.Wrap,
+                TextWrapping = TextWrapping.NoWrap,
                 TextTrimming = TextTrimming.None,
-                MaxWidth = 414
+                MaxWidth = 330,
+                VerticalAlignment = VerticalAlignment.Center
             };
-            var mi = new MenuItem { Header = headerText };
+            var mi = new MenuItem { Header = headerText, Tag = CreateContextMenuIcon(header) };
             mi.Click += (s, e) => action();
             return mi;
+        }
+
+        private static FrameworkElement CreateContextMenuIcon(string header)
+        {
+            string key;
+            if (header.IndexOf("Open", StringComparison.OrdinalIgnoreCase) >= 0 || header.Contains("打开")) key = "open";
+            else if (header.IndexOf("Differences", StringComparison.OrdinalIgnoreCase) >= 0 || header.Contains("差异")) key = "diff";
+            else if (header.IndexOf("Log", StringComparison.OrdinalIgnoreCase) >= 0 || header.Contains("日志")) key = "log";
+            else if (header.IndexOf("Update", StringComparison.OrdinalIgnoreCase) >= 0 || header.Contains("更新")) key = "update";
+            else if (header.IndexOf("Commit", StringComparison.OrdinalIgnoreCase) >= 0 || header.Contains("提交")) key = "commit";
+            else if (header.IndexOf("Revert", StringComparison.OrdinalIgnoreCase) >= 0 || header.Contains("还原")) key = "revert";
+            else if (header.IndexOf("ignore-on-commit", StringComparison.OrdinalIgnoreCase) >= 0 || header.Contains("忽略")) key = "ignore";
+            else if (header.IndexOf("Explorer", StringComparison.OrdinalIgnoreCase) >= 0 || header.Contains("目录")) key = "explorer";
+            else if (header.IndexOf("Add", StringComparison.OrdinalIgnoreCase) >= 0 || header.Contains("加入")) key = "add";
+            else key = "check";
+
+            var geometry = key == "open" ? "M2,3.5 L6,3.5 7.2,5 14,5 14,12.5 2,12.5 Z M2,7 L14,7" :
+                key == "diff" ? "M2,2 L7,2 7,14 2,14 Z M9,2 L14,2 14,14 9,14 Z M3.5,6 L5.5,6 M10,9 L13,9 M11.5,7.5 L11.5,10.5" :
+                key == "log" ? "M8,2 A6,6 0 1 0 8,14 A6,6 0 1 0 8,2 M8,4.5 L8,8 L10.5,9.5" :
+                key == "update" ? "M8,1.5 L8,10.5 M4,7 L8,11 L12,7 M2.5,12 L2.5,14.5 L13.5,14.5 L13.5,12" :
+                key == "commit" ? "M2,8 L5,8 M11,8 L14,8 M8,5 A3,3 0 1 0 8,11 A3,3 0 1 0 8,5 M6.5,8 L7.5,9 L9.5,7" :
+                key == "revert" ? "M3,5 L1.5,5 L1.5,1.5 M2,5 A6,6 0 1 1 1.8,10 M2,5 L5,7" :
+                key == "ignore" ? "M3,2.5 L13,2.5 L13,13.5 L3,13.5 Z M5,5.5 L11,5.5 M5,8 L11,8 M5,10.5 L8,10.5 M10,10 L14,14" :
+                key == "explorer" ? "M1.5,4.5 L1.5,3 L6.5,3 L7.9,4.5 L14.5,4.5 L14.5,13.5 L1.5,13.5 Z M5,7 L12,7 L12,11 L5,11 Z" :
+                key == "add" ? "M3,2 L10,2 L13,5 L13,14 L3,14 Z M10,2 L10,5 L13,5 M8,7 L8,12 M5.5,9.5 L10.5,9.5" :
+                "M3,8 L6,11 L13,4";
+            return new System.Windows.Shapes.Path
+            {
+                Data = Geometry.Parse(geometry),
+                Stroke = new SolidColorBrush(Color.FromRgb(0x4A, 0x57, 0x68)),
+                StrokeThickness = 1.15,
+                StrokeLineJoin = PenLineJoin.Round,
+                StrokeStartLineCap = PenLineCap.Round,
+                StrokeEndLineCap = PenLineCap.Round,
+                Width = 16,
+                Height = 16,
+                Stretch = Stretch.Uniform,
+                SnapsToDevicePixels = true
+            };
         }
 
         private void RunChangelistBatch(string clArgs, List<FileEntry> files)
