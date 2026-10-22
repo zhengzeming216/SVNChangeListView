@@ -668,7 +668,8 @@ namespace SvnChangelistView
             header.SetValue(HorizontalAlignmentProperty, HorizontalAlignment.Stretch);
             stack.AppendChild(header);
             var items = new FrameworkElementFactory(typeof(ItemsPresenter), "UiItemsHost");
-            items.SetValue(MarginProperty, new Thickness(0));
+            // 每层子树向右缩进一个 tab，目录与文件层级更清楚。
+            items.SetValue(MarginProperty, new Thickness(20, 0, 0, 0));
             items.SetValue(HorizontalAlignmentProperty, HorizontalAlignment.Stretch);
             stack.AppendChild(items);
             template.VisualTree = stack;

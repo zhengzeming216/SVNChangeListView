@@ -8,6 +8,7 @@ using System.Text;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
+using System.Windows.Data;
 using System.Windows.Input;
 using System.Windows.Media;
 using System.Windows.Threading;
@@ -1518,7 +1519,7 @@ namespace SvnChangelistView
             var menu = new ContextMenu
             {
                 MinWidth = 252,
-                MaxWidth = 340,
+                MaxWidth = 440,
                 Padding = new Thickness(0, 4, 0, 4),
                 Background = new SolidColorBrush(Color.FromRgb(0xF7, 0xF7, 0xF7)),
                 BorderBrush = new SolidColorBrush(Color.FromRgb(0xAE, 0xB0, 0xB7)),
@@ -1533,31 +1534,57 @@ namespace SvnChangelistView
                     Opacity = 0.18
                 }
             };
+            var itemTemplate = new ControlTemplate(typeof(MenuItem));
+            var itemBorder = new FrameworkElementFactory(typeof(Border), "MenuItemBorder");
+            itemBorder.SetValue(Border.BackgroundProperty, Brushes.Transparent);
+            itemBorder.SetValue(Border.PaddingProperty, new Thickness(12, 4, 12, 4));
+            var itemContent = new FrameworkElementFactory(typeof(ContentPresenter));
+            itemContent.SetBinding(ContentPresenter.ContentProperty, new Binding("Header") { RelativeSource = RelativeSource.TemplatedParent });
+            itemContent.SetBinding(ContentPresenter.ContentTemplateProperty, new Binding("HeaderTemplate") { RelativeSource = RelativeSource.TemplatedParent });
+            itemContent.SetValue(ContentPresenter.RecognizesAccessKeyProperty, true);
+            itemContent.SetValue(HorizontalAlignmentProperty, HorizontalAlignment.Left);
+            itemContent.SetValue(FrameworkElement.MaxWidthProperty, 414.0);
+            itemBorder.AppendChild(itemContent);
+            itemTemplate.VisualTree = itemBorder;
+            var hover = new Trigger { Property = MenuItem.IsHighlightedProperty, Value = true };
+            hover.Setters.Add(new Setter(Border.BackgroundProperty, new SolidColorBrush(Color.FromRgb(0xE2, 0xEA, 0xF4)), "MenuItemBorder"));
+            itemTemplate.Triggers.Add(hover);
+            var disabled = new Trigger { Property = MenuItem.IsEnabledProperty, Value = false };
+            disabled.Setters.Add(new Setter(UIElement.OpacityProperty, 0.5, "MenuItemBorder"));
+            itemTemplate.Triggers.Add(disabled);
+
             var itemStyle = new Style(typeof(MenuItem));
             itemStyle.Setters.Add(new Setter(Control.MinHeightProperty, 26.0));
             itemStyle.Setters.Add(new Setter(Control.FontSizeProperty, 12.0));
-            itemStyle.Setters.Add(new Setter(Control.PaddingProperty, new Thickness(31, 4, 12, 4)));
+            itemStyle.Setters.Add(new Setter(Control.PaddingProperty, new Thickness(0)));
             itemStyle.Setters.Add(new Setter(Control.HorizontalContentAlignmentProperty, HorizontalAlignment.Left));
             itemStyle.Setters.Add(new Setter(Control.BackgroundProperty, Brushes.Transparent));
             itemStyle.Setters.Add(new Setter(Control.BorderThicknessProperty, new Thickness(0)));
-            var hover = new Trigger { Property = MenuItem.IsHighlightedProperty, Value = true };
-            hover.Setters.Add(new Setter(Control.BackgroundProperty, new SolidColorBrush(Color.FromRgb(0xE2, 0xEA, 0xF4))));
-            hover.Setters.Add(new Setter(Control.BorderBrushProperty, Brushes.Transparent));
-            itemStyle.Triggers.Add(hover);
+            itemStyle.Setters.Add(new Setter(Control.TemplateProperty, itemTemplate));
             menu.Resources.Add(typeof(MenuItem), itemStyle);
 
+            var separatorTemplate = new ControlTemplate(typeof(Separator));
+            var separatorLine = new FrameworkElementFactory(typeof(Border));
+            separatorLine.SetValue(FrameworkElement.HeightProperty, 1.0);
+            separatorLine.SetValue(FrameworkElement.MarginProperty, new Thickness(12, 4, 0, 4));
+            separatorLine.SetValue(Border.BackgroundProperty, new SolidColorBrush(Color.FromRgb(0xD6, 0xD6, 0xDC)));
+            separatorTemplate.VisualTree = separatorLine;
             var separatorStyle = new Style(typeof(Separator));
-            separatorStyle.Setters.Add(new Setter(FrameworkElement.HeightProperty, 1.0));
-            separatorStyle.Setters.Add(new Setter(FrameworkElement.MarginProperty, new Thickness(29, 4, 0, 4)));
-            separatorStyle.Setters.Add(new Setter(Control.BackgroundProperty, new SolidColorBrush(Color.FromRgb(0xD6, 0xD6, 0xDC))));
-            separatorStyle.Setters.Add(new Setter(Control.BorderThicknessProperty, new Thickness(0)));
+            separatorStyle.Setters.Add(new Setter(Control.TemplateProperty, separatorTemplate));
             menu.Resources.Add(typeof(Separator), separatorStyle);
             return menu;
         }
 
         private MenuItem MakeItem(string header, Action action)
         {
-            var mi = new MenuItem { Header = header };
+            var headerText = new TextBlock
+            {
+                Text = header,
+                TextWrapping = TextWrapping.Wrap,
+                TextTrimming = TextTrimming.None,
+                MaxWidth = 414
+            };
+            var mi = new MenuItem { Header = headerText };
             mi.Click += (s, e) => action();
             return mi;
         }
