@@ -1084,6 +1084,18 @@ namespace SvnChangelistView
 
         private void OnTreeLeftDown(object sender, MouseButtonEventArgs e)
         {
+            // TreeViewItem 默认会在双击目录行时切换展开状态；目录仅用于分组显示，拦截该默认行为。
+            if (e.ClickCount >= 2 && e.OriginalSource is DependencyObject clickedSource)
+            {
+                var clickedNode = FindAncestor<TreeViewItem>(clickedSource);
+                if (clickedNode?.DataContext is FolderEntry)
+                {
+                    clickedNode.IsExpanded = true;
+                    e.Handled = true;
+                    return;
+                }
+            }
+
             if (e.OriginalSource is DependencyObject src && FindAncestor<CheckBox>(src) != null)
             {
                 return; // 点勾选框不改变选择
