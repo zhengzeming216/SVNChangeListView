@@ -13,8 +13,8 @@ using Microsoft.VisualStudio.Shell;
 [assembly: AssemblyCulture("")]
 [assembly: ComVisible(false)]
 [assembly: CLSCompliant(false)]
-[assembly: AssemblyVersion("1.4.7.0")]
-[assembly: AssemblyFileVersion("1.4.7.0")]
+[assembly: AssemblyVersion("1.4.21.0")]
+[assembly: AssemblyFileVersion("1.4.21.0")]
 
 namespace SvnChangelistView
 {
