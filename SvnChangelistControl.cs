@@ -1554,6 +1554,24 @@ namespace SvnChangelistView
                     Opacity = 0.18
                 }
             };
+            // ContextMenu 默认模板可能来自 VS/WPF 主题资源，模板本身会绘制左侧图标槽背景；
+            // 替换整个宿主模板，确保只渲染边框、滚动容器和菜单项，不留下系统 gutter。
+            var menuTemplate = new ControlTemplate(typeof(ContextMenu));
+            var menuBorder = new FrameworkElementFactory(typeof(Border));
+            menuBorder.SetBinding(Border.BackgroundProperty, new Binding("Background") { RelativeSource = RelativeSource.TemplatedParent });
+            menuBorder.SetBinding(Border.BorderBrushProperty, new Binding("BorderBrush") { RelativeSource = RelativeSource.TemplatedParent });
+            menuBorder.SetBinding(Border.BorderThicknessProperty, new Binding("BorderThickness") { RelativeSource = RelativeSource.TemplatedParent });
+            var menuScroll = new FrameworkElementFactory(typeof(ScrollViewer));
+            menuScroll.SetValue(ScrollViewer.CanContentScrollProperty, true);
+            menuScroll.SetValue(ScrollViewer.HorizontalScrollBarVisibilityProperty, ScrollBarVisibility.Disabled);
+            menuScroll.SetValue(ScrollViewer.VerticalScrollBarVisibilityProperty, ScrollBarVisibility.Auto);
+            var menuItems = new FrameworkElementFactory(typeof(ItemsPresenter));
+            menuItems.SetValue(KeyboardNavigation.DirectionalNavigationProperty, KeyboardNavigationMode.Cycle);
+            menuScroll.AppendChild(menuItems);
+            menuBorder.AppendChild(menuScroll);
+            menuTemplate.VisualTree = menuBorder;
+            menu.Template = menuTemplate;
+
             var itemTemplate = new ControlTemplate(typeof(MenuItem));
             var itemBorder = new FrameworkElementFactory(typeof(Border), "MenuItemBorder");
             itemBorder.SetValue(Border.BackgroundProperty, Brushes.Transparent);
