@@ -8,14 +8,15 @@ using System.Text;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
-using System.Windows.Data;
 using System.Windows.Input;
 using System.Windows.Media;
 using System.Windows.Threading;
 using System.Xml.Linq;
+using System.Runtime.InteropServices;
 using Microsoft.VisualStudio;
 using Microsoft.VisualStudio.Shell;
 using Microsoft.VisualStudio.Shell.Interop;
+using Microsoft.VisualStudio.PlatformUI;
 
 namespace SvnChangelistView
 {
@@ -26,6 +27,9 @@ namespace SvnChangelistView
         public string FullPath;
         public string Changelist;   // null = 不属于任何 changelist
         public bool Unversioned;
+
+        /// <summary>编辑器里有未保存修改（磁盘文件本身可能没变），显示时加 * 标记。</summary>
+        public bool DirtyOnly;
 
         private bool _isChecked;
         public bool IsChecked
@@ -70,12 +74,10 @@ namespace SvnChangelistView
         public List<FolderEntry> SubFolders = new List<FolderEntry>();
     }
 
-    public sealed class SvnChangelistControl : UserControl, IVsSolutionEvents
+    public sealed partial class SvnChangelistControl : UserControl, IVsSolutionEvents
     {
         private const string IgnoreChangelistName = "ignore-on-commit";
-        private static readonly Brush SelectedRowBrush = new SolidColorBrush(Color.FromArgb(0x2E, 0x00, 0x78, 0xD4));
-
-        /// <summary>关掉 TreeViewItem 自带的系统高亮（亮蓝色，太扎眼），选中效果统一用 SelectedRowBrush 呈现。</summary>
+        /// <summary>关闭原生选中背景，由文件行统一绘制主题高亮。</summary>
         private static void SoftenSelectionHighlight(TreeViewItem node)
         {
             node.Resources[SystemColors.HighlightBrushKey] = Brushes.Transparent;
@@ -83,17 +85,20 @@ namespace SvnChangelistView
         }
 
         private readonly SvnChangelistWindow _window;
-        private readonly TreeView _tree;
-        private readonly TextBlock _statusText;
-        private readonly Button _refreshButton;
-        private readonly Button _commitButton;
-        private readonly Button _updateButton;
-        private readonly CheckBox _autoRefreshBox;
-        private readonly DispatcherTimer _timer;
+        private TreeView _tree;
+        private TextBlock _statusText;
+        private Button _commitButton;
+        private Button _updateButton;
 
         private uint _solutionEventsCookie;
         private string _lastRoot;
         private bool _refreshBusy;
+        private bool _pendingRefresh;
+        private bool _isLoaded;
+        private string _solutionRoot;
+        private int _solutionGeneration;
+        private int _populateGeneration;
+        private bool _keyboardContextMenu;
         private int _pendingChangesCount = -1;
         private int _ignoreCount = -1;
 
@@ -102,6 +107,23 @@ namespace SvnChangelistView
 
         /// <summary>（待提交数, 本地专用数）变化时通知包，用于刷新状态栏徽标。</summary>
         public static event Action<int, int> CountsChanged;
+
+        /// <summary>控件请求立即刷新（例如文档保存时由包触发）。</summary>
+        public static event Action RefreshRequested;
+
+        /// <summary>触发一次刷新请求（无实例在显示时无效）。</summary>
+        public static void RequestRefresh()
+        {
+            RefreshRequested?.Invoke();
+        }
+
+        private static int _liveInstances;
+
+        /// <summary>工具窗口当前是否有实例在显示（打开时由控件自己刷新，包不必重复轮询）。</summary>
+        public static bool HasLiveInstance
+        {
+            get { return _liveInstances > 0; }
+        }
 
         private List<FileEntry> _currentFiles = new List<FileEntry>();
         private readonly HashSet<FileEntry> _selected = new HashSet<FileEntry>();
@@ -112,106 +134,28 @@ namespace SvnChangelistView
         {
             _window = window;
 
-            _refreshButton = MakeButton("刷新", "Refresh", (s, e) => StartRefresh());
-            _commitButton = MakeButton("提交…", "Commit…", (s, e) => OpenTortoise("commit", null));
-            ToolTipService.SetToolTip(_commitButton, L10n.T("打开 TortoiseSVN 提交对话框（ignore-on-commit 默认不勾选）",
-                "Open the TortoiseSVN commit dialog (ignore-on-commit is unchecked by default)"));
-            _updateButton = MakeButton("更新", "Update", (s, e) => OpenTortoise("update", null));
+            BuildUi();
+            _tree.AddHandler(Keyboard.PreviewKeyDownEvent, new KeyEventHandler(OnTreePreviewKeyDown), true);
+            _tree.AddHandler(Keyboard.KeyDownEvent, new KeyEventHandler(OnTreeNavigationKeyDown), true);
 
-            _autoRefreshBox = new CheckBox
+            Loaded += (s, e) =>
             {
-                VerticalAlignment = VerticalAlignment.Center,
-                Margin = new Thickness(8, 0, 0, 0),
-                IsChecked = true
+                if (!_isLoaded) { _isLoaded = true; _liveInstances++; }
+                RefreshRequested -= OnRefreshRequested;
+                RefreshRequested += OnRefreshRequested;
+                VSColorTheme.ThemeChanged -= OnThemeChanged;
+                VSColorTheme.ThemeChanged += OnThemeChanged;
+                AdviseSolutionEvents();
+                ApplyRowHighlight();
+                StartRefresh();
             };
-            _autoRefreshBox.Click += (s, e) => ApplyLanguage();
-
-            _statusText = new TextBlock
+            Unloaded += (s, e) =>
             {
-                VerticalAlignment = VerticalAlignment.Center,
-                Margin = new Thickness(8, 2, 4, 2),
-                Foreground = Brushes.DimGray,
-                TextTrimming = TextTrimming.CharacterEllipsis
+                if (_isLoaded) { _isLoaded = false; _liveInstances--; }
+                RefreshRequested -= OnRefreshRequested;
+                VSColorTheme.ThemeChanged -= OnThemeChanged;
+                UnadviseSolutionEvents();
             };
-
-            var header = new StackPanel { Orientation = Orientation.Horizontal };
-            header.Children.Add(_refreshButton);
-            header.Children.Add(_commitButton);
-            header.Children.Add(_updateButton);
-            header.Children.Add(_autoRefreshBox);
-            header.Children.Add(_statusText);
-
-            _tree = new TreeView
-            {
-                BorderThickness = new Thickness(0),
-                Background = Brushes.Transparent
-            };
-            _tree.PreviewMouseLeftButtonDown += OnTreeLeftDown;
-            _tree.MouseDoubleClick += OnDoubleClick;
-            _tree.ContextMenuOpening += OnContextMenuOpening;
-
-            var rootPanel = new DockPanel();
-            DockPanel.SetDock(header, Dock.Top);
-            rootPanel.Children.Add(header);
-            rootPanel.Children.Add(_tree);
-
-            Content = rootPanel;
-
-            _timer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(10) };
-            _timer.Tick += (s, e) =>
-            {
-                if (_autoRefreshBox.IsChecked == true)
-                {
-                    StartRefresh();
-                }
-            };
-            _timer.Start();
-
-            ApplyLanguage();
-            UpdateCaption();
-
-            Loaded += (s, e) => { AdviseSolutionEvents(); StartRefresh(); };
-            Unloaded += (s, e) => { UnadviseSolutionEvents(); _timer.Stop(); };
-        }
-
-        private Button MakeButton(string zh, string en, RoutedEventHandler onClick)
-        {
-            var b = new Button
-            {
-                Content = L10n.T(zh, en),
-                Padding = new Thickness(10, 2, 10, 2),
-                Margin = new Thickness(4, 2, 2, 2)
-            };
-            b.Click += onClick;
-            return b;
-        }
-
-        private void ApplyLanguage()
-        {
-            _refreshButton.Content = L10n.T("刷新", "Refresh");
-            _commitButton.Content = L10n.T("提交…", "Commit…");
-            _updateButton.Content = L10n.T("更新", "Update");
-            _autoRefreshBox.Content = L10n.T("自动刷新", "Auto refresh");
-            ToolTipService.SetToolTip(_autoRefreshBox, L10n.T("每 10 秒自动刷新一次 SVN 状态", "Refresh SVN status every 10 seconds"));
-            UpdateCaption();
-            RepopulateFromCache();
-        }
-
-        private void UpdateCaption()
-        {
-            var changes = _pendingChangesCount >= 0 ? _pendingChangesCount.ToString() : "…";
-            var ignore = _ignoreCount >= 0 ? _ignoreCount.ToString() : "…";
-            _window.Caption = "SVN ChangeList View  (" + L10n.T("待提交", "Changes") + ": " + changes +
-                              ", " + L10n.T("本地专用", "Local-only") + ": " + ignore + ")";
-        }
-
-        private void RepopulateFromCache()
-        {
-            // 语言切换后用缓存数据即时重画（保留勾选与选择状态）
-            if (_lastRoot != null && _currentFiles.Count > 0)
-            {
-                Populate(_lastRoot, _currentFiles, refreshStatus: false);
-            }
         }
 
         // ---------- 工具定位 ----------
@@ -306,11 +250,15 @@ namespace SvnChangelistView
                     UseShellExecute = true
                 };
 
-                if (command == "commit" || command == "update" || command == "revert")
+                if (command == "commit" || command == "update" || command == "revert" || command == "add")
                 {
-                    var proc = Process.Start(psi);
-                    proc.EnableRaisingEvents = true;
-                    proc.Exited += (s, e) => Dispatcher.BeginInvoke(new Action(StartRefresh));
+                    var proc = new Process { StartInfo = psi, EnableRaisingEvents = true };
+                    proc.Exited += (s, e) =>
+                    {
+                        proc.Dispose();
+                        Dispatcher.BeginInvoke(new Action(StartRefresh));
+                    };
+                    proc.Start();
                 }
                 else
                 {
@@ -377,44 +325,66 @@ namespace SvnChangelistView
             return directory;
         }
 
-        private void StartRefresh()
+        /// <summary>包在文档保存等时机请求刷新；可能来自非 UI 线程，切回 UI 线程再刷。</summary>
+        private void OnRefreshRequested()
+        {
+            Dispatcher.BeginInvoke(new Action(StartRefresh));
+        }
+
+        private async void StartRefresh()
         {
             if (_refreshBusy)
             {
+                _pendingRefresh = true;
                 return;
             }
 
+            _refreshBusy = true;
+            var generation = _solutionGeneration;
             try
             {
+                var solutionDir = GetSolutionDirectory();
+                solutionDir = string.IsNullOrEmpty(solutionDir) ? null : solutionDir.TrimEnd('\\', '/');
+                if (!string.Equals(_solutionRoot, solutionDir, StringComparison.OrdinalIgnoreCase))
+                {
+                    ClearSolutionView();
+                    _solutionRoot = solutionDir;
+                }
+                generation = _solutionGeneration;
+                if (string.IsNullOrEmpty(solutionDir))
+                {
+                    ClearSolutionView();
+                    SetStatus(L10n.T("未打开解决方案", "No solution open"));
+                    return;
+                }
+
                 var svnExe = FindSvnExe();
                 if (svnExe == null)
                 {
                     SetStatus(L10n.T("找不到 svn.exe，请确认已安装 TortoiseSVN", "svn.exe not found; please install TortoiseSVN"));
-                    _tree.Items.Clear();
                     return;
                 }
 
-                var solutionDir = GetSolutionDirectory();
-                if (string.IsNullOrEmpty(solutionDir))
-                {
-                    SetStatus(L10n.T("未打开解决方案", "No solution open"));
-                    _tree.Items.Clear();
-                    return;
-                }
-
-                solutionDir = solutionDir.TrimEnd('\\', '/');
                 SetStatus(L10n.T("正在读取 SVN 状态…", "Reading SVN status…"));
-                _refreshBusy = true;
-                _ = RefreshCoreAsync(svnExe, solutionDir);
+                await RefreshCoreAsync(svnExe, solutionDir, generation);
             }
             catch (Exception ex)
             {
+                if (generation == _solutionGeneration)
+                    SetStatus(L10n.T("刷新失败: ", "Refresh failed: ") + ex.Message);
+            }
+            finally
+            {
                 _refreshBusy = false;
-                SetStatus(L10n.T("刷新失败: ", "Refresh failed: ") + ex.Message);
+                if (_pendingRefresh)
+                {
+                    _pendingRefresh = false;
+                    Dispatcher.BeginInvoke(DispatcherPriority.Background, new Action(StartRefresh));
+                }
             }
         }
 
-        private async System.Threading.Tasks.Task RefreshCoreAsync(string svnExe, string solutionDir)
+        private async System.Threading.Tasks.Task RefreshCoreAsync(string svnExe, string solutionDir, int generation)
         {
             try
             {
@@ -436,12 +406,17 @@ namespace SvnChangelistView
                 {
                     await Dispatcher.InvokeAsync(() =>
                     {
-                        _tree.Items.Clear();
+                        if (generation != _solutionGeneration) return;
                         SetStatus("svn status 失败 (rc=" + statusRc + "): " + (string.IsNullOrWhiteSpace(statusError) ? "无输出" : statusError.Trim()));
-                        _refreshBusy = false;
                     });
                     return;
                 }
+
+                if (clRc != 0 || string.IsNullOrWhiteSpace(clXml))
+                    throw new InvalidOperationException("svn status --cl " + IgnoreChangelistName + " 失败 (rc=" + clRc + ")");
+                if (XDocument.Parse(xml).Root?.Name.LocalName != "status" ||
+                    XDocument.Parse(clXml).Root?.Name.LocalName != "status")
+                    throw new InvalidOperationException("svn status 返回了无效的 XML");
 
                 var files = ParseStatusXml(xml, solutionDir);
                 var clFiles = ParseChangelistXml(clXml, solutionDir, IgnoreChangelistName);
@@ -462,17 +437,15 @@ namespace SvnChangelistView
 
                 await Dispatcher.InvokeAsync(() =>
                 {
-                    Populate(solutionDir, merged);
-                    _refreshBusy = false;
+                    if (generation == _solutionGeneration) Populate(solutionDir, merged);
                 });
             }
             catch (Exception ex)
             {
                 await Dispatcher.InvokeAsync(() =>
                 {
-                    _tree.Items.Clear();
+                    if (generation != _solutionGeneration) return;
                     SetStatus(L10n.T("读取 SVN 状态失败: ", "Failed to read SVN status: ") + ex.Message);
-                    _refreshBusy = false;
                 });
             }
         }
@@ -625,6 +598,161 @@ namespace SvnChangelistView
         /// 无 UI 实例地拉取一次 SVN 计数，供状态栏徽标在工具窗口尚未打开时也能显示待提交数量。
         /// 复用与 Populate 相同的分组口径：Changes = 未归入任何 changelist 且已版本控制的条目；
         /// ignore-on-commit = 归入 ignore-on-commit 的条目。结尾会 raise IgnoreCountChanged / CountsChanged，
+        /// <summary>枚举当前打开且有未保存修改的文档（相对路径，'/' 分隔），只取给定目录下的。</summary>
+        internal static HashSet<string> GetDirtyDocumentPaths(string root)
+        {
+            var result = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            if (string.IsNullOrEmpty(root))
+            {
+                return result;
+            }
+
+            var rdt = Package.GetGlobalService(typeof(SVsRunningDocumentTable)) as IVsRunningDocumentTable;
+            if (rdt == null)
+            {
+                return result;
+            }
+
+            IEnumRunningDocuments enumDocs;
+            if (!ErrorHandler.Succeeded(rdt.GetRunningDocumentsEnum(out enumDocs)) || enumDocs == null)
+            {
+                return result;
+            }
+
+            var cookies = new uint[32];
+            while (enumDocs.Next((uint)cookies.Length, cookies, out uint fetched) == 0 && fetched > 0)
+            {
+                for (var i = 0; i < fetched; i++)
+                {
+                    IntPtr docData = IntPtr.Zero;
+                    try
+                    {
+                        if (!ErrorHandler.Succeeded(rdt.GetDocumentInfo(cookies[i], out _, out _, out _,
+                                out string fileName, out _, out _, out docData)))
+                        {
+                            continue;
+                        }
+
+                        var rel = ToRelativePath(root, fileName);
+                        if (rel == null || docData == IntPtr.Zero)
+                        {
+                            continue;
+                        }
+
+                        var persist = Marshal.GetObjectForIUnknown(docData) as IVsPersistDocData2;
+                        if (persist != null &&
+                            ErrorHandler.Succeeded(persist.IsDocDataDirty(out var isDirty)) && isDirty != 0)
+                        {
+                            result.Add(rel);
+                        }
+                    }
+                    catch
+                    {
+                        // 单个文档异常不影响其他
+                    }
+                    finally
+                    {
+                        if (docData != IntPtr.Zero)
+                        {
+                            Marshal.Release(docData);
+                        }
+                    }
+                }
+            }
+
+            return result;
+        }
+
+        private static string ToRelativePath(string root, string fullPath)
+        {
+            if (string.IsNullOrEmpty(root) || string.IsNullOrEmpty(fullPath))
+            {
+                return null;
+            }
+
+            root = root.TrimEnd('\\', '/');
+            if (!fullPath.StartsWith(root, StringComparison.OrdinalIgnoreCase))
+            {
+                return null;
+            }
+
+            var rel = fullPath.Substring(root.Length).TrimStart('\\', '/');
+            return rel.Length == 0 ? null : rel.Replace('\\', '/');
+        }
+
+        private static string CombineFullPath(string root, string rel)
+        {
+            try
+            {
+                return Path.Combine(root.TrimEnd('\\', '/'), rel.Replace('/', '\\'));
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        /// <summary>
+        /// 把"编辑器有未保存修改"的文档合并进文件列表：已存在的打上 DirtyOnly 标记；
+        /// svn status 里没出现但文件存在的（已版本控制、磁盘无改动）按 modified 追加。
+        /// </summary>
+        private static List<FileEntry> DetectUnsavedEdits(string root, IEnumerable<FileEntry> knownFiles)
+        {
+            var added = new List<FileEntry>();
+            HashSet<string> dirty;
+            try
+            {
+                dirty = GetDirtyDocumentPaths(root);
+            }
+            catch
+            {
+                return added;
+            }
+
+            if (dirty.Count == 0)
+            {
+                return added;
+            }
+
+            var known = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var f in knownFiles)
+            {
+                var rel = NormalizeRelPath(f.RelativePath);
+                known.Add(rel);
+                if (!f.Unversioned && dirty.Contains(rel))
+                {
+                    f.DirtyOnly = true;
+                }
+            }
+
+            foreach (var rel in dirty)
+            {
+                if (known.Contains(rel))
+                {
+                    continue;
+                }
+
+                var full = CombineFullPath(root, rel);
+                if (full == null || !File.Exists(full))
+                {
+                    continue;
+                }
+
+                added.Add(new FileEntry
+                {
+                    Status = "modified",
+                    RelativePath = rel,
+                    FullPath = full,
+                    Changelist = null,
+                    Unversioned = false,
+                    IsChecked = false,
+                    DirtyOnly = true
+                });
+            }
+
+            return added;
+        }
+
         /// 由包内的 StatusBarPillController 接收并更新右下角徽标。
         /// </summary>
         public static async System.Threading.Tasks.Task<int[]> ComputeBadgeCountsAsync(string solutionDir)
@@ -632,8 +760,7 @@ namespace SvnChangelistView
             var svnExe = FindSvnExe();
             if (svnExe == null || string.IsNullOrWhiteSpace(solutionDir))
             {
-                IgnoreCountChanged?.Invoke(0);
-                CountsChanged?.Invoke(0, 0);
+                // 没有可查询的条件：不抛事件，徽标保留上一次的数值，避免闪成 0
                 return new[] { 0, 0 };
             }
 
@@ -651,8 +778,7 @@ namespace SvnChangelistView
 
             if (statusRc != 0 || string.IsNullOrWhiteSpace(xml) || !xml.Contains("<status"))
             {
-                IgnoreCountChanged?.Invoke(0);
-                CountsChanged?.Invoke(0, 0);
+                // svn 查询失败（例如瞬时错误）：不抛事件，保留上一次的徽标数值
                 return new[] { 0, 0 };
             }
 
@@ -668,6 +794,12 @@ namespace SvnChangelistView
             foreach (var f in clFiles)
             {
                 byPath[NormalizeRelPath(f.RelativePath)] = f;
+            }
+
+            // 合并编辑器里未保存的修改，让右下角数字不等保存就变
+            foreach (var extra in DetectUnsavedEdits(solutionDir, byPath.Values.ToList()))
+            {
+                byPath[NormalizeRelPath(extra.RelativePath)] = extra;
             }
 
             var changes = 0;
@@ -696,29 +828,47 @@ namespace SvnChangelistView
 
         // ---------- 树形展示 ----------
 
-        /// <summary>没有历史记录时的默认展开状态：只有 Changes 展开，其余（ignore-on-commit、未版本控制、自定义 changelist）折叠。</summary>
-        private static bool IsExpandedByDefault(string kind)
-        {
-            return string.Equals(kind, GroupKinds.Changes, StringComparison.OrdinalIgnoreCase);
-        }
-
         private void Populate(string workingCopyRoot, List<FileEntry> files, bool refreshStatus = true)
         {
-            _lastRoot = workingCopyRoot;
-            _currentFiles = files ?? new List<FileEntry>();
-            _selected.Clear();
-            _rowTexts.Clear();
-            _tree.Items.Clear();
+            var sameRoot = string.Equals(_lastRoot, workingCopyRoot, StringComparison.OrdinalIgnoreCase);
+            var checkedPaths = new HashSet<string>(_currentFiles.Where(f => sameRoot && f.IsChecked)
+                .Select(f => f.FullPath), StringComparer.OrdinalIgnoreCase);
+            var selectedPaths = new HashSet<string>(_selected.Where(f => sameRoot)
+                .Select(f => f.FullPath), StringComparer.OrdinalIgnoreCase);
+            var lastClickedPath = sameRoot ? _lastClicked?.FullPath : null;
+            var treeSelectedPath = sameRoot ? GetSelectedFile()?.FullPath : null;
+            var hadTreeFocus = _tree.IsKeyboardFocusWithin;
+            var scroll = FindVisualChild<ScrollViewer>(_tree);
+            var verticalOffset = sameRoot && scroll != null ? scroll.VerticalOffset : 0;
+            var horizontalOffset = sameRoot && scroll != null ? scroll.HorizontalOffset : 0;
+            var populateGeneration = ++_populateGeneration;
+            var nextFiles = files == null ? new List<FileEntry>() : new List<FileEntry>(files);
+            nextFiles.AddRange(DetectUnsavedEdits(workingCopyRoot, nextFiles));
+            foreach (var file in _currentFiles) file.PropertyChanged -= OnFilePropertyChanged;
 
-            var changesGroup = new GroupEntry { Name = L10n.T("Changes（待提交）", "Changes (to commit)"), Kind = GroupKinds.Changes };
-            var unversionedGroup = new GroupEntry { Name = L10n.T("未版本控制（?）", "Unversioned (?)"), Kind = GroupKinds.Unversioned };
-            var changelistGroups = new Dictionary<string, GroupEntry>();
+            _lastRoot = workingCopyRoot;
+            _selected.Clear();
+            _lastClicked = null;
+            _rowTexts.Clear();
+            _rowBorders.Clear();
+            _tree.Items.Clear();
+            _currentFiles = nextFiles;
+            foreach (var file in _currentFiles)
+            {
+                file.IsChecked = !IsUiIgnoredFile(file) && checkedPaths.Contains(file.FullPath);
+                if (selectedPaths.Contains(file.FullPath)) _selected.Add(file);
+                if (string.Equals(file.FullPath, lastClickedPath, StringComparison.OrdinalIgnoreCase)) _lastClicked = file;
+                file.PropertyChanged -= OnFilePropertyChanged;
+                file.PropertyChanged += OnFilePropertyChanged;
+            }
+
+            var changesGroup = new GroupEntry { Name = "Changes", Kind = GroupKinds.Changes };
+            var unversionedGroup = new GroupEntry { Name = L10n.T("未版本控制", "Unversioned"), Kind = GroupKinds.Unversioned };
+            var changelistGroups = new Dictionary<string, GroupEntry>(StringComparer.OrdinalIgnoreCase);
             var changelistOrder = new List<string>();
 
             foreach (var file in _currentFiles)
             {
-                file.IsChecked = false;
-
                 if (file.Unversioned)
                 {
                     unversionedGroup.Files.Add(file);
@@ -734,9 +884,7 @@ namespace SvnChangelistView
                         var isIgnoreCl = string.Equals(file.Changelist, IgnoreChangelistName, StringComparison.OrdinalIgnoreCase);
                         group = new GroupEntry
                         {
-                            Name = isIgnoreCl
-                                ? L10n.T("Changelist \"ignore-on-commit\"", "Changelist \"ignore-on-commit\"")
-                                : file.Changelist,
+                            Name = isIgnoreCl ? IgnoreChangelistName : file.Changelist,
                             Kind = GroupKinds.Changelist(file.Changelist)
                         };
                         changelistGroups[file.Changelist] = group;
@@ -745,12 +893,6 @@ namespace SvnChangelistView
 
                     group.Files.Add(file);
                 }
-            }
-
-            if (refreshStatus)
-            {
-                SetStatus(workingCopyRoot + "    (" + _currentFiles.Count + " " + L10n.T("项", "items") + ", " +
-                          L10n.T("刷新于", "refreshed at ") + DateTime.Now.ToString("HH:mm:ss") + ")");
             }
 
             var ignoreGroup = changelistGroups.TryGetValue(IgnoreChangelistName, out var ig) ? ig : null;
@@ -781,8 +923,6 @@ namespace SvnChangelistView
             foreach (var group in ordered)
             {
                 var node = CreateGroupNode(group);
-                // 展开状态：优先用上次记录的值（跨 VS 会话保留）；没有记录时 Changes 默认展开，其余默认折叠
-                node.IsExpanded = ViewState.GetExpanded(group.Kind) ?? IsExpandedByDefault(group.Kind);
                 _tree.Items.Add(node);
             }
 
@@ -792,255 +932,53 @@ namespace SvnChangelistView
             IgnoreCountChanged?.Invoke(_ignoreCount);
             CountsChanged?.Invoke(_pendingChangesCount, _ignoreCount);
 
-            if (ordered.Count == 0 && refreshStatus)
+            var customFileCount = changelistGroups.Values.Where(g => !IsUiIgnoreKind(g.Kind)).Sum(g => g.Files.Count);
+            UpdateSummaryUi(_pendingChangesCount, _ignoreCount, unversionedGroup.Files.Count, customFileCount, refreshStatus);
+            ApplyRowHighlight();
+            UpdateSelectionUi();
+            Dispatcher.BeginInvoke(DispatcherPriority.Loaded, new Action(() =>
             {
-                SetStatus(workingCopyRoot + "    (" + L10n.T("工作副本干净, 刷新于 ", "clean working copy, refreshed at ") +
-                          DateTime.Now.ToString("HH:mm:ss") + ")");
-            }
+                if (populateGeneration != _populateGeneration) return;
+                var selectedNode = FindFileNode(_tree, treeSelectedPath);
+                if (selectedNode != null)
+                {
+                    selectedNode.IsSelected = true;
+                    if (hadTreeFocus && selectedNode.IsVisible) selectedNode.Focus();
+                }
+                var viewer = FindVisualChild<ScrollViewer>(_tree);
+                if (viewer == null) return;
+                viewer.ScrollToHorizontalOffset(horizontalOffset);
+                viewer.ScrollToVerticalOffset(verticalOffset);
+            }));
         }
 
-        private TreeViewItem CreateGroupNode(GroupEntry group)
+        private void OnFilePropertyChanged(object sender, PropertyChangedEventArgs e)
         {
-            var isIgnore = string.Equals(group.Kind, GroupKinds.Changelist(IgnoreChangelistName), StringComparison.OrdinalIgnoreCase);
-
-            var headerPanel = new StackPanel { Orientation = Orientation.Horizontal };
-            headerPanel.DataContext = group;
-
-            var selectAllBox = new CheckBox
-            {
-                VerticalAlignment = VerticalAlignment.Center,
-                Margin = new Thickness(0, 0, 4, 0),
-                ToolTip = L10n.T("全选/取消本组（用于批量提交）", "Select/deselect whole group (for batch commit)")
-            };
-            selectAllBox.Checked += (s, e) => { foreach (var f in group.Files) f.IsChecked = true; };
-            selectAllBox.Unchecked += (s, e) => { foreach (var f in group.Files) f.IsChecked = false; };
-
-            var nameText = new TextBlock
-            {
-                Text = isIgnore
-                    ? group.Name + L10n.T("（本地专用，提交时不勾选）", " (local only, unchecked on commit)")
-                    : group.Name,
-                FontWeight = FontWeights.SemiBold
-            };
-
-            var countText = new TextBlock
-            {
-                Text = "  " + group.Files.Count,
-                Foreground = Brushes.DimGray,
-                FontSize = 11,
-                VerticalAlignment = VerticalAlignment.Center
-            };
-
-            headerPanel.Children.Add(selectAllBox);
-            headerPanel.Children.Add(nameText);
-            headerPanel.Children.Add(countText);
-
-            if (isIgnore)
-            {
-                nameText.Foreground = Brushes.Gray;
-                nameText.FontStyle = FontStyles.Italic;
-                countText.Foreground = Brushes.Gray;
-            }
-
-            var node = new TreeViewItem
-            {
-                Header = headerPanel,
-                Background = Brushes.Transparent,
-                // 自定义模板：不含背景边框，悬停/点击外观不变（只有左侧箭头负责折叠）
-                Template = GroupRowTemplate
-            };
-            SoftenSelectionHighlight(node);
-
-            // 记录展开/折叠，跨 VS 会话保留
-            node.Expanded += (s, e) => ViewState.SetExpanded(group.Kind, true);
-            node.Collapsed += (s, e) => ViewState.SetExpanded(group.Kind, false);
-
-            // 仿 VisualSVN Pending Changes：只有顶级分组可折叠。
-            // 含文件的目录输出一行不可折叠的面包屑行（全路径），文件挂在该行下；
-            // 只含子目录的目录不单独成行，并入子目录的全路径显示。
-            var rootFolder = BuildFolderTree(group.Files);
-            AddFolderRows(node, rootFolder, isIgnore);
-            foreach (var file in rootFolder.Files.OrderBy(f => f.RelativePath, StringComparer.OrdinalIgnoreCase))
-            {
-                node.Items.Add(CreateFileNode(file, isIgnore));
-            }
-
-            return node;
+            if (string.IsNullOrEmpty(e.PropertyName) || e.PropertyName == "IsChecked") UpdateSelectionUi();
         }
 
-        /// <summary>递归输出文件夹行：有直接文件的目录出一行面包屑，纯目录层合并进子目录路径。</summary>
-        private void AddFolderRows(TreeViewItem parent, FolderEntry folder, bool inIgnoreGroup)
+        private static T FindVisualChild<T>(DependencyObject parent) where T : DependencyObject
         {
-            var cmp = StringComparer.OrdinalIgnoreCase;
-            if (folder.Files.Count > 0)
+            for (var i = 0; i < VisualTreeHelper.GetChildrenCount(parent); i++)
             {
-                parent.Items.Add(CreateFolderRow(folder, inIgnoreGroup));
+                var child = VisualTreeHelper.GetChild(parent, i);
+                var match = child as T ?? FindVisualChild<T>(child);
+                if (match != null) return match;
             }
-
-            foreach (var sub in folder.SubFolders.OrderBy(f => f.Name, cmp))
-            {
-                AddFolderRows(parent, sub, inIgnoreGroup);
-            }
+            return null;
         }
 
-        /// <summary>文件夹行：不可折叠（无展开箭头），显示全路径面包屑与文件数。</summary>
-        private TreeViewItem CreateFolderRow(FolderEntry folder, bool inIgnoreGroup)
+        private static TreeViewItem FindFileNode(ItemsControl parent, string fullPath)
         {
-            var headerPanel = new StackPanel { Orientation = Orientation.Horizontal };
-            headerPanel.DataContext = folder;
-
-            var selectAllBox = new CheckBox
+            if (string.IsNullOrEmpty(fullPath)) return null;
+            foreach (TreeViewItem node in parent.Items)
             {
-                VerticalAlignment = VerticalAlignment.Center,
-                Margin = new Thickness(0, 0, 4, 0),
-                ToolTip = L10n.T("全选/取消本文件夹", "Select/deselect this folder")
-            };
-            selectAllBox.Checked += (s, e) => SetFolderChecked(folder, true);
-            selectAllBox.Unchecked += (s, e) => SetFolderChecked(folder, false);
-
-            var nameText = new TextBlock
-            {
-                Text = folder.FullRelative.Replace("\\", " \\ ") + "  (" + CountFolderFiles(folder) + ")",
-                FontWeight = FontWeights.SemiBold,
-                Foreground = inIgnoreGroup ? Brushes.Gray : Brushes.Black
-            };
-
-            headerPanel.Children.Add(selectAllBox);
-            headerPanel.Children.Add(nameText);
-
-            var node = new TreeViewItem
-            {
-                Header = headerPanel,
-                IsExpanded = true,
-                // 自定义模板：无展开箭头、不可折叠，子项（文件）始终显示
-                Template = FlatRowTemplate
-            };
-            SoftenSelectionHighlight(node);
-            ToolTipService.SetToolTip(node, folder.FullRelative);
-
-            foreach (var file in folder.Files.OrderBy(f => f.RelativePath, StringComparer.OrdinalIgnoreCase))
-            {
-                node.Items.Add(CreateFileNode(file, inIgnoreGroup));
+                var file = node.DataContext as FileEntry;
+                if (file != null && string.Equals(file.FullPath, fullPath, StringComparison.OrdinalIgnoreCase)) return node;
+                var match = FindFileNode(node, fullPath);
+                if (match != null) return match;
             }
-
-            return node;
-        }
-
-        /// <summary>展开箭头模板：小三角，展开时转为向下；无背景/悬停效果。</summary>
-        private static readonly ControlTemplate ExpanderTemplate = CreateExpanderTemplate();
-
-        private static ControlTemplate CreateExpanderTemplate()
-        {
-            var template = new ControlTemplate(typeof(ToggleButton));
-            var arrow = new FrameworkElementFactory(typeof(System.Windows.Shapes.Path), "Arrow");
-            arrow.SetValue(System.Windows.Shapes.Path.DataProperty, Geometry.Parse("M 0,1 L 5,5 L 0,9 Z"));
-            arrow.SetValue(System.Windows.Shapes.Shape.FillProperty, Brushes.Gray);
-            arrow.SetValue(FrameworkElement.HorizontalAlignmentProperty, HorizontalAlignment.Center);
-            arrow.SetValue(FrameworkElement.VerticalAlignmentProperty, VerticalAlignment.Center);
-            template.VisualTree = arrow;
-
-            var expanded = new Trigger { Property = ToggleButton.IsCheckedProperty, Value = true };
-            expanded.Setters.Add(new Setter(System.Windows.Shapes.Path.DataProperty,
-                Geometry.Parse("M 1,0 L 9,0 L 5,5 Z"), "Arrow"));
-            template.Triggers.Add(expanded);
-
-            return template;
-        }
-
-        /// <summary>分组行模板：左侧展开箭头 + 头部 + 子项；不含背景边框，所以悬停/点击外观不变。</summary>
-        private static readonly ControlTemplate GroupRowTemplate = CreateGroupRowTemplate();
-
-        private static ControlTemplate CreateGroupRowTemplate()
-        {
-            var template = new ControlTemplate(typeof(TreeViewItem));
-
-            var dock = new FrameworkElementFactory(typeof(DockPanel));
-            dock.SetValue(DockPanel.LastChildFillProperty, true);
-
-            var expander = new FrameworkElementFactory(typeof(ToggleButton), "Expander");
-            expander.SetValue(DockPanel.DockProperty, Dock.Left);
-            expander.SetValue(FrameworkElement.WidthProperty, 14.0);
-            expander.SetValue(FrameworkElement.FocusableProperty, false);
-            // 必须顶端对齐：展开后 DockPanel 会变高，若居中箭头会落到整块的垂直中间（看起来“飘走”）
-            expander.SetValue(FrameworkElement.VerticalAlignmentProperty, VerticalAlignment.Top);
-            expander.SetValue(FrameworkElement.MarginProperty, new Thickness(4, 3, 2, 0));
-            expander.SetValue(ButtonBase.ClickModeProperty, ClickMode.Press);
-            expander.SetBinding(ToggleButton.IsCheckedProperty, new Binding("IsExpanded")
-            {
-                RelativeSource = new RelativeSource(RelativeSourceMode.TemplatedParent),
-                Mode = BindingMode.TwoWay
-            });
-            expander.SetValue(Control.TemplateProperty, ExpanderTemplate);
-            dock.AppendChild(expander);
-
-            var stack = new FrameworkElementFactory(typeof(StackPanel));
-            stack.SetValue(StackPanel.OrientationProperty, Orientation.Vertical);
-
-            var header = new FrameworkElementFactory(typeof(ContentPresenter));
-            header.SetBinding(ContentPresenter.ContentProperty, new Binding("Header")
-            {
-                RelativeSource = new RelativeSource(RelativeSourceMode.TemplatedParent)
-            });
-            stack.AppendChild(header);
-
-            var items = new FrameworkElementFactory(typeof(ItemsPresenter), "ItemsHost");
-            items.SetValue(FrameworkElement.MarginProperty, new Thickness(2, 0, 0, 0));
-            stack.AppendChild(items);
-
-            dock.AppendChild(stack);
-            template.VisualTree = dock;
-
-            var collapsed = new Trigger { Property = TreeViewItem.IsExpandedProperty, Value = false };
-            collapsed.Setters.Add(new Setter(FrameworkElement.VisibilityProperty, Visibility.Collapsed, "ItemsHost"));
-            template.Triggers.Add(collapsed);
-
-            return template;
-        }
-
-        /// <summary>文件夹行的精简模板：头部 + 子项（固定缩进），没有展开箭头因此无法折叠。</summary>
-        private static readonly ControlTemplate FlatRowTemplate = CreateFlatRowTemplate();
-
-        private static ControlTemplate CreateFlatRowTemplate()
-        {
-            var template = new ControlTemplate(typeof(TreeViewItem));
-            var panel = new FrameworkElementFactory(typeof(StackPanel));
-            var header = new FrameworkElementFactory(typeof(ContentPresenter));
-            // 模板内绑 Header 必须指向模板父级（TreeViewItem）；
-            // 普通 Binding 会解析到继承的 DataContext（没有 Header 属性）导致头部空白
-            header.SetBinding(ContentPresenter.ContentProperty, new System.Windows.Data.Binding("Header")
-            {
-                RelativeSource = new RelativeSource(RelativeSourceMode.TemplatedParent)
-            });
-            panel.AppendChild(header);
-            var items = new FrameworkElementFactory(typeof(ItemsPresenter));
-            items.SetValue(FrameworkElement.MarginProperty, new Thickness(18, 0, 0, 0));
-            panel.AppendChild(items);
-            template.VisualTree = panel;
-            return template;
-        }
-
-        private static void SetFolderChecked(FolderEntry folder, bool value)
-        {
-            foreach (var f in folder.Files)
-            {
-                f.IsChecked = value;
-            }
-
-            foreach (var sub in folder.SubFolders)
-            {
-                SetFolderChecked(sub, value);
-            }
-        }
-
-        private static int CountFolderFiles(FolderEntry folder)
-        {
-            int n = folder.Files.Count;
-            foreach (var sub in folder.SubFolders)
-            {
-                n += CountFolderFiles(sub);
-            }
-
-            return n;
+            return null;
         }
 
         /// <summary>
@@ -1084,54 +1022,6 @@ namespace SvnChangelistView
             return root;
         }
 
-        private TreeViewItem CreateFileNode(FileEntry file, bool inIgnoreGroup)
-        {
-            var panel = new StackPanel { Orientation = Orientation.Horizontal, Background = Brushes.Transparent };
-            panel.DataContext = file;
-
-            var checkBox = new CheckBox
-            {
-                VerticalAlignment = VerticalAlignment.Center,
-                Margin = new Thickness(0, 0, 4, 0)
-            };
-            checkBox.SetBinding(CheckBox.IsCheckedProperty, new Binding("IsChecked")
-            {
-                Source = file,
-                Mode = BindingMode.TwoWay,
-                UpdateSourceTrigger = UpdateSourceTrigger.PropertyChanged
-            });
-
-            var statusText = new TextBlock
-            {
-                Text = StatusLabel(file),
-                Width = 22,
-                FontWeight = FontWeights.SemiBold,
-                Foreground = StatusBrush(file)
-            };
-
-            var pathText = new TextBlock
-            {
-                // 目录已在面包屑行里显示，文件行只显示文件名
-                Text = Path.GetFileName(file.RelativePath),
-                Foreground = inIgnoreGroup ? Brushes.Gray : Brushes.Black
-            };
-
-            panel.Children.Add(checkBox);
-            panel.Children.Add(statusText);
-            panel.Children.Add(pathText);
-
-            _rowTexts[file] = pathText;
-
-            var node = new TreeViewItem
-            {
-                Header = panel
-            };
-            SoftenSelectionHighlight(node);
-
-            ToolTipService.SetToolTip(node, file.FullPath);
-            return node;
-        }
-
         private static string StatusLabel(FileEntry file)
         {
             switch (file.Status)
@@ -1165,11 +1055,29 @@ namespace SvnChangelistView
 
         // ---------- 多选（Ctrl / Shift 点击） ----------
 
+        private void OnThemeChanged(ThemeChangedEventArgs e)
+        {
+            Dispatcher.BeginInvoke(new Action(ApplyRowHighlight));
+        }
+
         private void ApplyRowHighlight()
         {
-            foreach (var kv in _rowTexts)
+            var highlight = TryFindResource(EnvironmentColors.SystemHighlightBrushKey) as SolidColorBrush ??
+                TryFindResource(SystemColors.HighlightBrushKey) as SolidColorBrush ?? SystemColors.HighlightBrush;
+            var background = new SolidColorBrush(highlight.Color) { Opacity = SystemParameters.HighContrast ? 0.4 : 0.16 };
+            var outline = new SolidColorBrush(highlight.Color) { Opacity = SystemParameters.HighContrast ? 1 : 0.65 };
+            foreach (var kv in _rowBorders)
             {
-                kv.Value.Background = _selected.Contains(kv.Key) ? SelectedRowBrush : Brushes.Transparent;
+                var selected = _selected.Contains(kv.Key);
+                kv.Value.Background = selected ? background : Brushes.Transparent;
+                if (selected) kv.Value.BorderBrush = outline;
+                else kv.Value.SetResourceReference(Border.BorderBrushProperty, EnvironmentColors.ToolWindowBorderBrushKey);
+                kv.Value.BorderThickness = selected ? new Thickness(1) : new Thickness(0, 0, 0, 1);
+            }
+            foreach (var text in _rowTexts.Values)
+            {
+                text.Background = Brushes.Transparent;
+                text.SetResourceReference(TextBlock.ForegroundProperty, EnvironmentColors.ToolWindowTextBrushKey);
             }
         }
 
@@ -1229,31 +1137,86 @@ namespace SvnChangelistView
             return null;
         }
 
-        /// <summary>右键操作的目标文件集合：Ctrl 选中集 &gt; 勾选集 &gt; 当前文件。</summary>
+        private void OnTreePreviewKeyDown(object sender, KeyEventArgs e)
+        {
+            if (e.Key == Key.Apps || (e.Key == Key.F10 && (Keyboard.Modifiers & ModifierKeys.Shift) != 0))
+            {
+                _keyboardContextMenu = true;
+                Dispatcher.BeginInvoke(DispatcherPriority.Background, new Action(() => _keyboardContextMenu = false));
+            }
+            if (e.Key == Key.Space || e.Key == Key.Enter) OnTreeKeyDown(sender, e);
+        }
+
+        private void OnTreeNavigationKeyDown(object sender, KeyEventArgs e)
+        {
+            if (e.Key != Key.Up && e.Key != Key.Down && e.Key != Key.Left && e.Key != Key.Right &&
+                e.Key != Key.Home && e.Key != Key.End && e.Key != Key.PageUp && e.Key != Key.PageDown) return;
+            var generation = _populateGeneration;
+            Dispatcher.BeginInvoke(DispatcherPriority.Input, new Action(() =>
+            {
+                if (generation != _populateGeneration) return;
+                _selected.Clear();
+                var file = GetSelectedFile();
+                if (file != null) _selected.Add(file);
+                _lastClicked = file;
+                ApplyRowHighlight();
+            }));
+        }
+
+        private void OnTreeKeyDown(object sender, KeyEventArgs e)
+        {
+            if (e.Handled || FindAncestor<ToggleButton>(e.OriginalSource as DependencyObject) != null) return;
+            var node = FindAncestor<TreeViewItem>(Keyboard.FocusedElement as DependencyObject) ?? _tree.SelectedItem as TreeViewItem;
+            var file = node?.DataContext as FileEntry;
+            if (file == null) return;
+            if (e.Key == Key.Space)
+            {
+                if (!IsUiIgnoredFile(file)) file.IsChecked = !file.IsChecked;
+                e.Handled = true;
+            }
+            else if (e.Key == Key.Enter)
+            {
+                if (File.Exists(file.FullPath)) OpenFile(file.FullPath);
+                e.Handled = true;
+            }
+        }
+
+        /// <summary>批量目标必须与当前文件同类别，且当前文件属于对应选择集。</summary>
         private List<FileEntry> MenuTargets(FileEntry clicked)
         {
-            if (clicked != null && _selected.Contains(clicked) && _selected.Count > 1)
-            {
-                return _selected.ToList();
-            }
-
-            var checkedFiles = _currentFiles.Where(f => f.IsChecked).ToList();
-            if (checkedFiles.Count > 0)
-            {
-                return checkedFiles;
-            }
-
-            if (clicked != null)
-            {
-                return new List<FileEntry> { clicked };
-            }
-
-            return new List<FileEntry>();
+            if (clicked == null) return new List<FileEntry>();
+            var kind = InferUiKind(new List<FileEntry> { clicked }, IsUiIgnoredFile(clicked));
+            Func<FileEntry, bool> sameKind = f => string.Equals(kind,
+                InferUiKind(new List<FileEntry> { f }, IsUiIgnoredFile(f)), StringComparison.OrdinalIgnoreCase);
+            if (_selected.Contains(clicked) && _selected.Count > 1)
+                return _selected.Where(sameKind).ToList();
+            if (clicked.IsChecked)
+                return _currentFiles.Where(f => f.IsChecked && sameKind(f)).ToList();
+            return new List<FileEntry> { clicked };
         }
 
         private List<FileEntry> GetVersionedCommitTargets(List<FileEntry> files)
         {
-            return files.Where(f => !f.Unversioned).ToList();
+            return files.Where(f => !f.Unversioned && !IsUiIgnoredFile(f)).ToList();
+        }
+
+        private void CommitChecked()
+        {
+            CommitWithTortoise(_currentFiles.Where(f => f.IsChecked).ToList());
+        }
+
+        private void AddUnversioned(List<FileEntry> files)
+        {
+            var targets = files.Where(f => f.Unversioned).Select(f => f.FullPath)
+                .Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+            if (targets.Count == 0) return;
+            var message = L10n.T("将以下项目加入 SVN：", "Add these items to SVN:") + Environment.NewLine +
+                Environment.NewLine + string.Join(Environment.NewLine, targets) + Environment.NewLine + Environment.NewLine +
+                L10n.T("若包含目录，请在 TortoiseSVN Add 对话框中检查子项范围；此处不会执行递归 svn add。是否继续？",
+                    "For directories, review the child-item scope in the TortoiseSVN Add dialog. No recursive svn add is run here. Continue?");
+            if (MessageBox.Show(message, L10n.T("加入 SVN", "Add to SVN"), MessageBoxButton.YesNo,
+                MessageBoxImage.Question, MessageBoxResult.No) == MessageBoxResult.Yes)
+                OpenTortoise("add", "\"" + string.Join("*", targets) + "\"");
         }
 
         private void CommitWithTortoise(List<FileEntry> files)
@@ -1261,8 +1224,8 @@ namespace SvnChangelistView
             var targets = GetVersionedCommitTargets(files);
             if (targets.Count == 0)
             {
-                SetStatus(L10n.T("没有可提交的文件（未版本控制文件需要先 svn add）",
-                    "Nothing to commit (unversioned files need svn add first)"));
+                SetStatus(L10n.T("没有可提交的文件：请先移出 ignore-on-commit；未版本控制项目请先加入 SVN。",
+                    "Nothing to commit: remove items from ignore-on-commit first; add unversioned items to SVN first."));
                 return;
             }
 
@@ -1292,9 +1255,13 @@ namespace SvnChangelistView
                     Arguments = args,
                     UseShellExecute = true
                 };
-                var proc = Process.Start(psi);
-                proc.EnableRaisingEvents = true;
-                proc.Exited += (s, e) => Dispatcher.BeginInvoke(new Action(StartRefresh));
+                var proc = new Process { StartInfo = psi, EnableRaisingEvents = true };
+                proc.Exited += (s, e) =>
+                {
+                    proc.Dispose();
+                    Dispatcher.BeginInvoke(new Action(StartRefresh));
+                };
+                proc.Start();
                 SetStatus(L10n.T("已打开 TortoiseSVN 提交对话框（", "Opened TortoiseSVN commit dialog (") +
                           targets.Count + L10n.T(" 个文件）", " files)"));
             }
@@ -1306,7 +1273,9 @@ namespace SvnChangelistView
 
         private void OnDoubleClick(object sender, MouseButtonEventArgs e)
         {
-            var file = GetSelectedFile();
+            if (FindAncestor<ToggleButton>(e.OriginalSource as DependencyObject) != null) return;
+            var node = FindAncestor<TreeViewItem>(e.OriginalSource as DependencyObject);
+            var file = node?.DataContext as FileEntry;
             if (file == null || !File.Exists(file.FullPath))
             {
                 return;
@@ -1411,12 +1380,15 @@ namespace SvnChangelistView
 
         private void OnContextMenuOpening(object sender, ContextMenuEventArgs e)
         {
-            DependencyObject hit = Mouse.DirectlyOver as DependencyObject;
-            var item = FindAncestor<TreeViewItem>(hit);
-
-            var headerElement = item == null ? null : item.Header as FrameworkElement;
-            var file = headerElement?.DataContext as FileEntry;
-            var group = headerElement?.DataContext as GroupEntry;
+            var keyboard = _keyboardContextMenu || (e.CursorLeft < 0 && e.CursorTop < 0);
+            _keyboardContextMenu = false;
+            var item = keyboard
+                ? FindAncestor<TreeViewItem>(Keyboard.FocusedElement as DependencyObject) ?? _tree.SelectedItem as TreeViewItem
+                : FindAncestor<TreeViewItem>(Mouse.DirectlyOver as DependencyObject);
+            var data = item?.DataContext ?? (item?.Header as FrameworkElement)?.DataContext;
+            var file = data as FileEntry;
+            var group = data as GroupEntry;
+            var folder = data as FolderEntry;
 
             var menu = new ContextMenu();
 
@@ -1438,13 +1410,13 @@ namespace SvnChangelistView
                         () => OpenTortoise("log", "\"" + file.FullPath + "\"")));
                     menu.Items.Add(MakeItem(L10n.T("Update（更新此文件）", "Update (this file)"),
                         () => OpenTortoise("update", "\"" + file.FullPath + "\"")));
-                    menu.Items.Add(MakeItem(
-                        L10n.T("Commit...（提交 ", "Commit... (") + versionedTargets.Count + L10n.T(" 个文件）", " files)"),
-                        () => CommitWithTortoise(targets)));
+                    if (versionedTargets.Count > 0)
+                        menu.Items.Add(MakeItem(
+                            L10n.T("Commit...（提交 ", "Commit... (") + versionedTargets.Count + L10n.T(" 个文件）", " files)"),
+                            () => CommitWithTortoise(versionedTargets)));
                     menu.Items.Add(MakeItem(L10n.T("Revert Changes...（还原 ", "Revert Changes... (") + n +
                         L10n.T(" 个文件）", " files)"), () => OpenTortoise("revert",
                         "\"" + string.Join("*", targets.Select(f => f.FullPath)) + "\"")));
-                    menu.Items.Add(new Separator());
 
                     if (string.Equals(file.Changelist, IgnoreChangelistName, StringComparison.OrdinalIgnoreCase))
                     {
@@ -1468,18 +1440,65 @@ namespace SvnChangelistView
                     }));
                 }
 
-                menu.Items.Add(new Separator());
+                if (file.Unversioned)
+                    menu.Items.Add(MakeItem(L10n.T("加入 SVN…", "Add to SVN…"), () => AddUnversioned(targets)));
+                if (!IsUiIgnoredFile(file))
+                {
+                    menu.Items.Add(new Separator());
+                    menu.Items.Add(MakeItem(L10n.T("勾选目标文件", "Check target files"), () =>
+                    {
+                        foreach (var target in targets) target.IsChecked = true;
+                        UpdateSelectionUi();
+                    }));
+                    menu.Items.Add(MakeItem(L10n.T("清除目标勾选", "Clear target checkmarks"), () =>
+                    {
+                        foreach (var target in targets) target.IsChecked = false;
+                        UpdateSelectionUi();
+                    }));
+                }
             }
-            else if (group != null)
+            else if (group != null || folder != null)
             {
-                menu.Items.Add(MakeItem(L10n.T("全选本组", "Select whole group"), () => { foreach (var f in group.Files) f.IsChecked = true; }));
-                menu.Items.Add(MakeItem(L10n.T("取消本组", "Deselect whole group"), () => { foreach (var f in group.Files) f.IsChecked = false; }));
-                menu.Items.Add(MakeItem(L10n.T("Commit...（提交本组全部可提交文件）", "Commit... (all committable files in group)"),
-                    () => CommitWithTortoise(group.Files)));
-                menu.Items.Add(new Separator());
+                // 扁平目录行只操作该行实际展示的文件，不扩展到其他目录或分组。
+                var targets = group != null ? group.Files : folder.Files;
+                var ignored = IsUiIgnoreKind(group != null ? group.Kind : item.Tag as string) ||
+                    targets.Any(IsUiIgnoredFile);
+                if (ignored)
+                {
+                    menu.Items.Add(MakeItem(L10n.T("移出 ignore-on-commit", "Remove from ignore-on-commit"),
+                        () => RunChangelistBatch("--remove", targets.Where(IsUiIgnoredFile).ToList())));
+                }
+                else
+                {
+                    menu.Items.Add(MakeItem(group != null ? L10n.T("勾选本组", "Check whole group") : L10n.T("勾选此目录", "Check this folder"), () =>
+                    {
+                        foreach (var target in targets) target.IsChecked = true;
+                        UpdateSelectionUi();
+                    }));
+                    menu.Items.Add(MakeItem(L10n.T("清除勾选", "Clear checkmarks"), () =>
+                    {
+                        foreach (var target in targets) target.IsChecked = false;
+                        UpdateSelectionUi();
+                    }));
+                    var eligible = GetVersionedCommitTargets(targets);
+                    if (eligible.Count > 0)
+                    {
+                        menu.Items.Add(MakeItem(L10n.T("提交全部可提交文件…", "Commit all eligible files…"),
+                            () => CommitWithTortoise(eligible)));
+                        menu.Items.Add(MakeItem(L10n.T("加入 ignore-on-commit", "Add to ignore-on-commit"),
+                            () => RunChangelistBatch(IgnoreChangelistName, eligible)));
+                    }
+                    if (targets.Any(f => f.Unversioned))
+                        menu.Items.Add(MakeItem(L10n.T("加入 SVN…", "Add to SVN…"), () => AddUnversioned(targets)));
+                }
             }
 
-            menu.Items.Add(MakeItem(L10n.T("刷新", "Refresh"), StartRefresh));
+            if (menu.Items.Count == 0) { e.Handled = true; return; }
+            if (keyboard && item != null)
+            {
+                menu.PlacementTarget = item.Header as UIElement ?? item;
+                menu.Placement = PlacementMode.Bottom;
+            }
             _tree.ContextMenu = menu;
         }
 
@@ -1526,7 +1545,8 @@ namespace SvnChangelistView
         {
             while (from != null && !(from is T))
             {
-                from = System.Windows.Media.VisualTreeHelper.GetParent(from);
+                var content = from as FrameworkContentElement;
+                from = content != null ? content.Parent : VisualTreeHelper.GetParent(from);
             }
 
             return from as T;
@@ -1570,22 +1590,51 @@ namespace SvnChangelistView
             }
         }
 
+        private void ClearSolutionView()
+        {
+            _solutionGeneration++;
+            _populateGeneration++;
+            _pendingRefresh = false;
+            foreach (var file in _currentFiles) file.PropertyChanged -= OnFilePropertyChanged;
+            _currentFiles.Clear();
+            _selected.Clear();
+            _lastClicked = null;
+            _rowTexts.Clear();
+            _rowBorders.Clear();
+            _tree.Items.Clear();
+            _lastRoot = null;
+            _solutionRoot = null;
+            _pendingChangesCount = 0;
+            _ignoreCount = 0;
+            _lastUiRefresh = null;
+            UpdateSummaryUi(0, 0, 0, 0, false);
+            _hasUiSummary = false;
+            _summaryText.Text = "";
+            _rootCountText.Text = "";
+            UpdateCaption();
+            IgnoreCountChanged?.Invoke(0);
+            CountsChanged?.Invoke(0, 0);
+        }
+
         public int OnAfterOpenSolution(object pUnkReserved, int fNewSolution)
         {
-            Dispatcher.BeginInvoke(new Action(StartRefresh));
+            Dispatcher.Invoke(() =>
+            {
+                ClearSolutionView();
+                var root = GetSolutionDirectory();
+                _solutionRoot = string.IsNullOrEmpty(root) ? null : root.TrimEnd('\\', '/');
+                StartRefresh();
+            });
             return VSConstants.S_OK;
         }
 
         public int OnAfterCloseSolution(object pUnkReserved)
         {
-            Dispatcher.BeginInvoke(new Action(() =>
+            Dispatcher.Invoke(() =>
             {
-                _tree.Items.Clear();
-                _pendingChangesCount = -1;
-                UpdateCaption();
-                CountsChanged?.Invoke(0, 0);
+                ClearSolutionView();
                 SetStatus(L10n.T("未打开解决方案", "No solution open"));
-            }));
+            });
             return VSConstants.S_OK;
         }
 

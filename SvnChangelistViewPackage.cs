@@ -1,11 +1,14 @@
 using System;
 using System.ComponentModel.Design;
+using System.IO;
+using System.Linq;
 using System.Runtime.InteropServices;
 using System.Threading;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Media;
+using System.Windows.Threading;
 using Microsoft.VisualStudio;
 using Microsoft.VisualStudio.Shell;
 using Microsoft.VisualStudio.Shell.Interop;
@@ -18,13 +21,18 @@ namespace SvnChangelistView
     [ProvideMenuResource("Menus.ctmenu", 1)]
     [ProvideAutoLoad(VSConstants.UICONTEXT.SolutionExists_string, PackageAutoLoadFlags.BackgroundLoad)]
     [ProvideToolWindow(typeof(SvnChangelistWindow))]
-    [ProvideToolWindowVisibility(typeof(SvnChangelistWindow), VSConstants.UICONTEXT.SolutionExists_string)]
     public sealed class SvnChangelistViewPackage : AsyncPackage
     {
         private OleMenuCommand _badgeCommand;
         private StatusBarPillController _pill;
         private int _lastChanges;
         private int _lastIgnore;
+        private DispatcherTimer _dirtyTimer;
+        private FileSystemWatcher _fsw;
+        private uint _rdtCookie;
+        private bool _badgeBusy;
+        private string _lastDirtyKey;
+        private DateTime _lastFswTrigger = DateTime.MinValue;
 
         protected override async Task InitializeAsync(CancellationToken cancellationToken, IProgress<ServiceProgressData> progress)
         {
@@ -72,6 +80,17 @@ namespace SvnChangelistView
                 }
             });
 
+            // 实时刷新（不再有手动"刷新"按钮和"自动刷新"复选框）：
+            //   1) 编辑器脏标记检测（400ms，只做轻量 RDT 枚举，不跑 svn）→ 未保存也即时反映
+            //   2) 文件系统监听（解决方案目录）→ 外部工具（如 WorkBuddy）改文件即时反映
+            //   3) 文档保存事件（见下方 RDT 订阅）
+            _dirtyTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(400) };
+            _dirtyTimer.Tick += (s, e) => CheckDirtyDocuments();
+            _dirtyTimer.Start();
+
+            // 文档保存即刷新（比轮询更即时）
+            AdviseRunningDocTableEvents();
+
             // 启动即拉取一次 SVN 计数：让右下角徽标在工具窗口打开前就显示待提交数量。
             // 工具窗口未打开时不会触发 StartRefresh，所以这里用无 UI 实例的静态方法主动拉一次。
             _ = this.JoinableTaskFactory.RunAsync(async () =>
@@ -83,10 +102,102 @@ namespace SvnChangelistView
                     var solDir = GetSolutionDir();
                     if (!string.IsNullOrEmpty(solDir))
                     {
+                        WatchSolutionDir(solDir);
                         await SvnChangelistControl.ComputeBadgeCountsAsync(solDir);
                         return;
                     }
                 }
+            });
+        }
+
+        /// <summary>检测"打开的文档是否有未保存修改"的变化，一变就触发刷新。</summary>
+        private void CheckDirtyDocuments()
+        {
+            try
+            {
+                var solDir = GetSolutionDir();
+                if (string.IsNullOrEmpty(solDir))
+                {
+                    return;
+                }
+
+                var dirty = SvnChangelistControl.GetDirtyDocumentPaths(solDir);
+                var key = string.Join("|", dirty.OrderBy(x => x, StringComparer.OrdinalIgnoreCase));
+                if (key == _lastDirtyKey)
+                {
+                    return;
+                }
+
+                _lastDirtyKey = key;
+                TriggerRefresh();
+            }
+            catch
+            {
+                // 忽略：下一 tick 再试
+            }
+        }
+
+        private void TriggerRefresh()
+        {
+            if (SvnChangelistControl.HasLiveInstance)
+            {
+                SvnChangelistControl.RequestRefresh(); // 控件自己刷树并 raise CountsChanged
+                return;
+            }
+
+            _ = RefreshBadgeAsync();
+        }
+
+        /// <summary>监听解决方案目录，捕获外部工具改文件（不经过 VS 保存）。</summary>
+        private void WatchSolutionDir(string solDir)
+        {
+            ThreadHelper.ThrowIfNotOnUIThread();
+            try
+            {
+                if (_fsw != null)
+                {
+                    _fsw.EnableRaisingEvents = false;
+                    _fsw.Dispose();
+                    _fsw = null;
+                }
+
+                if (string.IsNullOrEmpty(solDir) || !Directory.Exists(solDir))
+                {
+                    return;
+                }
+
+                _fsw = new FileSystemWatcher(solDir)
+                {
+                    IncludeSubdirectories = true,
+                    InternalBufferSize = 65536,
+                    NotifyFilter = NotifyFilters.LastWrite | NotifyFilters.FileName | NotifyFilters.Size
+                };
+                _fsw.Changed += OnFileSystemChanged;
+                _fsw.Created += OnFileSystemChanged;
+                _fsw.Deleted += OnFileSystemChanged;
+                _fsw.Renamed += OnFileSystemChanged;
+                _fsw.EnableRaisingEvents = true;
+            }
+            catch
+            {
+                // 监听失败不影响其他刷新途径
+            }
+        }
+
+        private void OnFileSystemChanged(object sender, FileSystemEventArgs e)
+        {
+            // 防抖：一次批量改动只触发一次刷新
+            var now = DateTime.UtcNow;
+            if ((now - _lastFswTrigger).TotalMilliseconds < 800)
+            {
+                return;
+            }
+
+            _lastFswTrigger = now;
+            _ = this.JoinableTaskFactory.RunAsync(async () =>
+            {
+                await this.JoinableTaskFactory.SwitchToMainThreadAsync();
+                TriggerRefresh();
             });
         }
 
@@ -147,6 +258,104 @@ namespace SvnChangelistView
             }
 
             return null;
+        }
+
+        /// <summary>无 UI 实例地刷一次徽标计数（工具窗口未打开时使用）。</summary>
+        private async Task RefreshBadgeAsync()
+        {
+            if (_badgeBusy)
+            {
+                return;
+            }
+
+            var solDir = GetSolutionDir();
+            if (string.IsNullOrEmpty(solDir))
+            {
+                return;
+            }
+
+            _badgeBusy = true;
+            try
+            {
+                await SvnChangelistControl.ComputeBadgeCountsAsync(solDir);
+            }
+            finally
+            {
+                _badgeBusy = false;
+            }
+        }
+
+        private void AdviseRunningDocTableEvents()
+        {
+            ThreadHelper.ThrowIfNotOnUIThread();
+            try
+            {
+                var rdt = GetService(typeof(SVsRunningDocumentTable)) as IVsRunningDocumentTable;
+                if (rdt != null)
+                {
+                    rdt.AdviseRunningDocTableEvents(new RunningDocTableEvents(this), out _rdtCookie);
+                }
+            }
+            catch
+            {
+                // 忽略：拿不到 RDT 就只靠定时轮询
+            }
+        }
+
+        /// <summary>文档保存：立即刷新（切回 UI 线程）。</summary>
+        private void OnDocumentSaved()
+        {
+            _ = this.JoinableTaskFactory.RunAsync(async () =>
+            {
+                await this.JoinableTaskFactory.SwitchToMainThreadAsync();
+                TriggerRefresh();
+            });
+        }
+
+        private sealed class RunningDocTableEvents : IVsRunningDocTableEvents
+        {
+            private readonly SvnChangelistViewPackage _pkg;
+
+            public RunningDocTableEvents(SvnChangelistViewPackage pkg)
+            {
+                _pkg = pkg;
+            }
+
+            public int OnAfterSave(uint docCookie)
+            {
+                _pkg.OnDocumentSaved();
+                return 0;
+            }
+
+            public int OnAfterFirstDocumentLock(uint docCookie, uint dwRDTLockType, uint dwReadLocks, uint dwEditLocks)
+            {
+                return 0;
+            }
+
+            public int OnBeforeLastDocumentUnlock(uint docCookie, uint dwRDTLockType, uint dwReadLocks, uint dwEditLocks)
+            {
+                return 0;
+            }
+
+            public int OnAfterAttributeChange(uint docCookie, uint grfAttribs)
+            {
+                return 0;
+            }
+
+            public int OnAfterAttributeChangeEx(uint docCookie, uint grfAttribs, IVsHierarchy pHierOld, uint itemidOld, string pszMkDocumentOld, IVsHierarchy pHierNew, uint itemidNew, string pszMkDocumentNew)
+            {
+                return 0;
+            }
+
+            public int OnBeforeDocumentWindowShow(uint docCookie, int fFirstShow, IVsWindowFrame pFrame)
+            {
+                return 0;
+            }
+
+            public int OnAfterDocumentWindowHide(uint docCookie, IVsWindowFrame pFrame)
+            {
+                return 0;
+            }
         }
     }
 
