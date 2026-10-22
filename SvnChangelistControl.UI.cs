@@ -491,7 +491,12 @@ namespace SvnChangelistView
 
         private void CollapseUiTree()
         {
-            foreach (TreeViewItem node in _tree.Items) SetUiExpanded(node, false);
+            // 只折叠三个顶层主分组；文件夹行永远展开，不参与“全部折叠”。
+            foreach (TreeViewItem node in _tree.Items)
+            {
+                if (node.DataContext is GroupEntry && node.HasItems)
+                    node.IsExpanded = false;
+            }
         }
 
         private static void SetUiExpanded(TreeViewItem node, bool expanded)

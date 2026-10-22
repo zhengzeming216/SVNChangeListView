@@ -1518,6 +1518,14 @@ namespace SvnChangelistView
             }
 
             if (menu.Items.Count == 0) { e.Handled = true; return; }
+            // 显式把模板赋给每个子项，避免 VS/WPF 全局菜单主题覆盖隐式样式并重现左侧系统图标槽。
+            var menuItemStyle = menu.Resources[typeof(MenuItem)] as Style;
+            var separatorStyle = menu.Resources[typeof(Separator)] as Style;
+            foreach (var menuEntry in menu.Items)
+            {
+                if (menuEntry is MenuItem menuItem && menuItemStyle != null) menuItem.Style = menuItemStyle;
+                else if (menuEntry is Separator separator && separatorStyle != null) separator.Style = separatorStyle;
+            }
             if (keyboard && item != null)
             {
                 menu.PlacementTarget = item.Header as UIElement ?? item;
