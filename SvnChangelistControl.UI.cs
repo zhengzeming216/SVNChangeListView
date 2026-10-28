@@ -32,6 +32,7 @@ namespace SvnChangelistView
         private Button _moreButton;
         private Button _addButton;
         private Button _clearButton;
+        private Button _syncButton;
         private TextBox _commitMessageBox;
         private TextBlock _commitHintText;
         private TextBlock _commitCountText;
@@ -75,12 +76,14 @@ namespace SvnChangelistView
             DockPanel.SetDock(_moreButton, Dock.Right);
             tools.Children.Add(_moreButton);
             var leftTools = new StackPanel { Orientation = Orientation.Horizontal };
-            _commitButton = MakeUiButton("commit", (s, e) => CommitChecked(), true);
-            _updateButton = MakeUiButton("update", (s, e) => OpenTortoise("update", null), true);
+            _commitButton = MakeUiButton("push", (s, e) => CommitChecked(), true);
+            _updateButton = MakeUiButton("pull", (s, e) => OpenTortoise("update", null), true);
+            _syncButton = MakeUiButton("sync", (s, e) => SyncChecked(), true);
             _refreshButton = MakeUiButton("refresh", (s, e) => StartRefresh(), false);
             _collapseButton = MakeUiButton("collapse", (s, e) => CollapseUiTree(), false);
             leftTools.Children.Add(_commitButton);
             leftTools.Children.Add(_updateButton);
+            leftTools.Children.Add(_syncButton);
             var divider = new Border { Width = 1, Height = 18, Margin = new Thickness(5, 0, 5, 0) };
             divider.SetResourceReference(Border.BackgroundProperty, EnvironmentColors.ToolWindowBorderBrushKey);
             leftTools.Children.Add(divider);
@@ -237,7 +240,7 @@ namespace SvnChangelistView
         /// 提交前的二次确认（说明可选，但提交动作需要确认）：列出工作副本、说明与文件清单，
         /// 默认焦点落在“返回修改”，避免误回车直接提交。
         /// </summary>
-        private bool ConfirmCommit(IList<FileEntry> targets, string message, string root)
+        private bool ConfirmCommit(IList<FileEntry> targets, string message, string root, bool pullFirst = false)
         {
             var dialog = new Window
             {
@@ -273,8 +276,11 @@ namespace SvnChangelistView
             header.Child = headerText;
 
             var body = new StackPanel { Margin = new Thickness(18, 12, 18, 6) };
-            var lead = MakeUiText(L10n.T("即将提交 ", "Committing ") + targets.Count +
-                L10n.T(" 个文件，请核对以下内容。", " file(s). Please review before committing."));
+            var lead = MakeUiText(pullFirst
+                ? L10n.T("即将先拉取（Update）工作副本，再提交 ", "Will update (pull) the working copy, then commit ") +
+                  targets.Count + L10n.T(" 个文件，请核对以下内容。", " file(s). Please review before continuing.")
+                : L10n.T("即将提交 ", "Committing ") + targets.Count +
+                  L10n.T(" 个文件，请核对以下内容。", " file(s). Please review before committing."));
             lead.TextWrapping = TextWrapping.Wrap;
             lead.TextTrimming = TextTrimming.None;
             lead.Margin = new Thickness(0, 0, 0, 8);
@@ -288,8 +294,12 @@ namespace SvnChangelistView
                     : message, false));
             body.Children.Add(MakeConfirmField(L10n.T("本次文件 · ", "Files · ") + targets.Count));
             body.Children.Add(MakeConfirmFileList(targets));
-            var warning = MakeUiText(L10n.T("确认后将提交至 SVN 仓库并产生新修订；不会提交未勾选或本地忽略的条目。",
-                "Confirming commits these files to the SVN repository and creates a new revision. Unchecked or ignored items are not included."));
+            var warning = MakeUiText(
+                (pullFirst
+                    ? L10n.T("确认后先拉取工作副本：拉取失败或产生冲突将中止，不会提交。", "After confirming, the working copy is updated first; a failed update or conflicts abort the commit. ")
+                    : "") +
+                L10n.T("确认后将提交至 SVN 仓库并产生新修订；不会提交未勾选或本地忽略的条目。",
+                    "Confirming commits these files to the SVN repository and creates a new revision. Unchecked or ignored items are not included."));
             warning.TextWrapping = TextWrapping.Wrap;
             warning.TextTrimming = TextTrimming.None;
             warning.Margin = new Thickness(0, 10, 0, 0);
@@ -389,8 +399,8 @@ namespace SvnChangelistView
             }
             else if (versioned.Count == 0)
             {
-                _commitHintText.Text = L10n.T("勾选 Changes 中的文件后点击“提交”即可直接写入 SVN；说明可留空。",
-                    "Check files under Changes, then click Commit to write them straight to SVN; the message may be empty.");
+                _commitHintText.Text = L10n.T("勾选 Changes 中的文件后点击“推送”即可提交到 SVN；说明可留空。",
+                    "Check files under Changes, then click Push to commit them to SVN; the message may be empty.");
             }
             else
             {
@@ -411,8 +421,9 @@ namespace SvnChangelistView
         private void ApplyLanguage()
         {
             if (_tree == null) return;
-            SetUiButtonText(_commitButton, L10n.T("提交", "Commit"), L10n.T("直接提交已勾选的版本控制文件到 SVN；提交说明可留空", "Commit checked versioned files straight to SVN; the message is optional"));
-            SetUiButtonText(_updateButton, L10n.T("更新", "Update"), L10n.T("更新工作副本", "Update working copy"));
+            SetUiButtonText(_commitButton, L10n.T("推送", "Push"), L10n.T("推送（SVN Commit）：提交已勾选的版本控制文件；提交说明可留空", "Push (SVN Commit): commit the checked versioned files; the message is optional"));
+            SetUiButtonText(_updateButton, L10n.T("拉取", "Pull"), L10n.T("拉取（SVN Update）：更新工作副本", "Pull (SVN Update): update the working copy"));
+            SetUiButtonText(_syncButton, L10n.T("同步", "Sync"), L10n.T("拉取并推送：先 Update 工作副本，再提交已勾选的文件", "Sync: update the working copy first, then commit the checked files"));
             SetUiButtonText(_refreshButton, L10n.T("刷新", "Refresh"), L10n.T("刷新 SVN 状态", "Refresh SVN status"));
             SetUiButtonText(_collapseButton, L10n.T("全部折叠", "Collapse All"), L10n.T("折叠所有分组和目录", "Collapse all groups and folders"));
             SetUiButtonText(_moreButton, L10n.T("更多", "More"), L10n.T("更多操作", "More actions"));
@@ -660,6 +671,7 @@ namespace SvnChangelistView
             _addButton.Visibility = unversioned > 0 ? Visibility.Visible : Visibility.Collapsed;
             _addButton.IsEnabled = unversioned > 0;
             _commitButton.IsEnabled = versioned > 0 && !_committing;
+            _syncButton.IsEnabled = versioned > 0 && !_committing;
             _clearButton.IsEnabled = versioned + unversioned > 0 && !_committing;
             UpdateCommitComposerUi();
         }
@@ -857,6 +869,9 @@ namespace SvnChangelistView
             switch (name)
             {
                 case "commit": geometry = "M 2,8 L 6,12 L 14,3"; break;
+                case "push": geometry = "M 8,12 L 8,2 M 4,6 L 8,2 L 12,6 M 3,14 L 13,14"; break;
+                case "pull": geometry = "M 8,2 L 8,12 M 4,8 L 8,12 L 12,8 M 3,14 L 13,14"; break;
+                case "sync": geometry = "M 13,6 A 5.2,5.2 0 0 0 4,4 M 3,1 L 3,5 L 7,5 M 3,10 A 5.2,5.2 0 0 0 12,12 M 13,15 L 13,11 L 9,11"; break;
                 case "update": geometry = "M 8,1 L 8,11 M 4,7 L 8,11 L 12,7 M 2,11 L 2,14 L 14,14 L 14,11"; break;
                 case "refresh": geometry = "M 13,5 A 6,6 0 1 0 13,11 M 13,1 L 13,5 L 9,5"; break;
                 case "collapse": geometry = "M 2,3 L 4,3 M 7,3 L 14,3 M 2,8 L 4,8 M 7,8 L 14,8 M 2,13 L 4,13 M 7,13 L 14,13"; break;

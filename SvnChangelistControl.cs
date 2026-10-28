@@ -1229,11 +1229,18 @@ namespace SvnChangelistView
             CommitDirect(_currentFiles.Where(f => f.IsChecked).ToList());
         }
 
+        /// <summary>拉取并推送：先 svn update（拉取），成功后再提交已勾选文件（推送）。</summary>
+        private void SyncChecked()
+        {
+            CommitDirect(_currentFiles.Where(f => f.IsChecked).ToList(), pullFirst: true);
+        }
+
         /// <summary>
         /// 直接提交到 SVN（不打开 TortoiseSVN 的提交对话框）。
         /// 提交说明可选：留空时用 --force-log 允许空日志；说明写入临时文件按 UTF-8 传给 svn。
+        /// pullFirst=true 时先执行 svn update，拉取失败或产生冲突则中止提交。
         /// </summary>
-        private async void CommitDirect(List<FileEntry> files)
+        private async void CommitDirect(List<FileEntry> files, bool pullFirst = false)
         {
             if (_committing) return;
 
@@ -1260,7 +1267,7 @@ namespace SvnChangelistView
             var root = _lastRoot ?? (GetSolutionDirectory() ?? Environment.CurrentDirectory);
 
             // 说明可选，但提交动作必须二次确认，避免误点直接把文件写进仓库。
-            if (!ConfirmCommit(targets, message, root))
+            if (!ConfirmCommit(targets, message, root, pullFirst))
             {
                 SetStatus(L10n.T("已取消提交，说明与勾选保持不变。", "Commit cancelled; message and selection kept."));
                 return;
@@ -1269,6 +1276,39 @@ namespace SvnChangelistView
             _committing = true;
             UpdateSelectionUi();
             SetStatus(L10n.T("正在提交 ", "Committing ") + targets.Count + L10n.T(" 个文件…", " file(s)…"));
+
+            if (pullFirst)
+            {
+                SetStatus(L10n.T("正在拉取（Update）…", "Pulling (update)…"));
+                string updateOut = null, updateErr = null;
+                var updateRc = -1;
+                try
+                {
+                    await System.Threading.Tasks.Task.Run(() =>
+                        updateOut = RunSvn(svnExe, "update --accept postpone", root, out updateErr, out updateRc));
+                }
+                catch (Exception ex)
+                {
+                    updateErr = ex.Message;
+                    updateRc = -1;
+                }
+
+                var conflicted = (updateOut != null &&
+                                  (updateOut.IndexOf("Summary of conflicts", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                                   updateOut.Contains("冲突摘要"))) ||
+                                 (updateErr != null && updateErr.IndexOf("conflict", StringComparison.OrdinalIgnoreCase) >= 0);
+                if (updateRc != 0 || conflicted)
+                {
+                    _committing = false;
+                    SetStatus((updateRc != 0
+                                  ? L10n.T("拉取失败，已中止提交：", "Pull failed; commit aborted: ")
+                                  : L10n.T("拉取产生冲突，已中止提交，请先解决冲突：", "Pull produced conflicts; resolve them before committing: ")) +
+                              FirstMeaningfulLine(updateErr, updateOut));
+                    UpdateSelectionUi();
+                    StartRefresh();
+                    return;
+                }
+            }
 
             string messageFile = null;
             string output = null, error = null;
