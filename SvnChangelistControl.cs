@@ -1259,6 +1259,13 @@ namespace SvnChangelistView
                 .Replace("\r\n", "\n").TrimEnd();
             var root = _lastRoot ?? (GetSolutionDirectory() ?? Environment.CurrentDirectory);
 
+            // 说明可选，但提交动作必须二次确认，避免误点直接把文件写进仓库。
+            if (!ConfirmCommit(targets, message, root))
+            {
+                SetStatus(L10n.T("已取消提交，说明与勾选保持不变。", "Commit cancelled; message and selection kept."));
+                return;
+            }
+
             _committing = true;
             UpdateSelectionUi();
             SetStatus(L10n.T("正在提交 ", "Committing ") + targets.Count + L10n.T(" 个文件…", " file(s)…"));

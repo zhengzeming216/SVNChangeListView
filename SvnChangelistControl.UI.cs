@@ -233,6 +233,149 @@ namespace SvnChangelistView
             return stack;
         }
 
+        /// <summary>
+        /// 提交前的二次确认（说明可选，但提交动作需要确认）：列出工作副本、说明与文件清单，
+        /// 默认焦点落在“返回修改”，避免误回车直接提交。
+        /// </summary>
+        private bool ConfirmCommit(IList<FileEntry> targets, string message, string root)
+        {
+            var dialog = new Window
+            {
+                Title = L10n.T("确认提交到 SVN 仓库", "Confirm commit to SVN"),
+                Width = 520,
+                SizeToContent = SizeToContent.Height,
+                ResizeMode = ResizeMode.NoResize,
+                WindowStartupLocation = WindowStartupLocation.CenterOwner,
+                ShowInTaskbar = false,
+                Background = Background,
+                Foreground = Foreground,
+                FontFamily = FontFamily,
+                FontSize = FontSize,
+                UseLayoutRounding = true,
+                SnapsToDevicePixels = true
+            };
+            try
+            {
+                var owner = Window.GetWindow(this);
+                if (owner != null && !ReferenceEquals(owner, dialog)) dialog.Owner = owner;
+            }
+            catch (InvalidOperationException)
+            {
+                // 宿主窗口尚未就绪时退化为屏幕居中显示，不让确认框失败。
+                dialog.WindowStartupLocation = WindowStartupLocation.CenterScreen;
+            }
+
+            var header = new Border { BorderThickness = new Thickness(0, 0, 0, 1), Padding = new Thickness(18, 14, 18, 10) };
+            header.SetResourceReference(Border.BorderBrushProperty, EnvironmentColors.ToolWindowBorderBrushKey);
+            var headerText = MakeUiText(L10n.T("确认提交到 SVN 仓库", "Confirm commit to SVN"));
+            headerText.FontSize = FontSize + 2;
+            headerText.FontWeight = FontWeights.SemiBold;
+            header.Child = headerText;
+
+            var body = new StackPanel { Margin = new Thickness(18, 12, 18, 6) };
+            var lead = MakeUiText(L10n.T("即将提交 ", "Committing ") + targets.Count +
+                L10n.T(" 个文件，请核对以下内容。", " file(s). Please review before committing."));
+            lead.TextWrapping = TextWrapping.Wrap;
+            lead.TextTrimming = TextTrimming.None;
+            lead.Margin = new Thickness(0, 0, 0, 8);
+            body.Children.Add(lead);
+            body.Children.Add(MakeConfirmField(L10n.T("工作副本", "Working copy")));
+            body.Children.Add(MakeConfirmValue(root, true));
+            body.Children.Add(MakeConfirmField(L10n.T("提交说明", "Commit message")));
+            body.Children.Add(MakeConfirmValue(
+                string.IsNullOrWhiteSpace(message)
+                    ? L10n.T("（未填写，将提交空说明）", "(left empty; committed with an empty log message)")
+                    : message, false));
+            body.Children.Add(MakeConfirmField(L10n.T("本次文件 · ", "Files · ") + targets.Count));
+            body.Children.Add(MakeConfirmFileList(targets));
+            var warning = MakeUiText(L10n.T("确认后将提交至 SVN 仓库并产生新修订；不会提交未勾选或本地忽略的条目。",
+                "Confirming commits these files to the SVN repository and creates a new revision. Unchecked or ignored items are not included."));
+            warning.TextWrapping = TextWrapping.Wrap;
+            warning.TextTrimming = TextTrimming.None;
+            warning.Margin = new Thickness(0, 10, 0, 0);
+            warning.Opacity = 0.85;
+            body.Children.Add(warning);
+
+            var scroller = new ScrollViewer
+            {
+                VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+                HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
+                MaxHeight = Math.Max(240, SystemParameters.WorkArea.Height * 0.85 - 170),
+                Content = body
+            };
+
+            var buttons = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Right };
+            var cancel = new Button
+            {
+                Content = L10n.T("返回修改", "Back to edit"), MinWidth = 88, Height = 26,
+                Margin = new Thickness(8, 0, 0, 0), IsCancel = true
+            };
+            var confirm = new Button
+            {
+                Content = L10n.T("确认提交", "Commit"), MinWidth = 88, Height = 26,
+                Margin = new Thickness(8, 0, 0, 0), IsDefault = false
+            };
+            confirm.Click += (s, e) => dialog.DialogResult = true;
+            buttons.Children.Add(cancel);
+            buttons.Children.Add(confirm);
+            var footer = new Border { BorderThickness = new Thickness(0, 1, 0, 0), Padding = new Thickness(18, 10, 18, 12), Child = buttons };
+            footer.SetResourceReference(Border.BorderBrushProperty, EnvironmentColors.ToolWindowBorderBrushKey);
+
+            var rootPanel = new StackPanel();
+            rootPanel.Children.Add(header);
+            rootPanel.Children.Add(scroller);
+            rootPanel.Children.Add(footer);
+            dialog.Content = rootPanel;
+            dialog.Loaded += (s, e) => cancel.Focus();
+
+            return dialog.ShowDialog() == true;
+        }
+
+        private TextBlock MakeConfirmField(string text)
+        {
+            var field = MakeUiText(text);
+            field.FontSize = Math.Max(11, FontSize - 1);
+            field.Opacity = 0.75;
+            field.Margin = new Thickness(0, 8, 0, 4);
+            return field;
+        }
+
+        private FrameworkElement MakeConfirmValue(string text, bool isPath)
+        {
+            var value = MakeUiText(text ?? "");
+            value.TextWrapping = TextWrapping.Wrap;
+            value.TextTrimming = TextTrimming.None;
+            if (isPath) value.FontSize = Math.Max(11, FontSize - 1);
+            var border = new Border { BorderThickness = new Thickness(1), Padding = new Thickness(8, 6, 8, 6), Child = value };
+            border.SetResourceReference(Border.BorderBrushProperty, EnvironmentColors.ToolWindowBorderBrushKey);
+            return new ScrollViewer
+            {
+                VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+                HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
+                MaxHeight = 132,
+                Content = border
+            };
+        }
+
+        private FrameworkElement MakeConfirmFileList(IList<FileEntry> targets)
+        {
+            var list = new ListBox
+            {
+                MaxHeight = 180, BorderThickness = new Thickness(1), Padding = new Thickness(0),
+                HorizontalContentAlignment = HorizontalAlignment.Stretch
+            };
+            list.SetResourceReference(Control.BorderBrushProperty, EnvironmentColors.ToolWindowBorderBrushKey);
+            list.SetResourceReference(Control.BackgroundProperty, EnvironmentColors.ToolWindowBackgroundBrushKey);
+            foreach (var file in targets)
+            {
+                var item = MakeUiText(string.IsNullOrEmpty(file.RelativePath) ? file.FullPath : file.RelativePath);
+                item.Margin = new Thickness(6, 2, 6, 2);
+                item.ToolTip = file.FullPath;
+                list.Items.Add(item);
+            }
+            return list;
+        }
+
         private void UpdateCommitComposerUi()
         {
             if (_commitCountText == null || _commitHintText == null) return;
@@ -251,8 +394,8 @@ namespace SvnChangelistView
             }
             else
             {
-                _commitHintText.Text = L10n.T("将直接提交 ", "Commits ") + versioned.Count +
-                    L10n.T(" 个文件到 SVN，说明可留空。", " file(s) straight to SVN; the message is optional.");
+                _commitHintText.Text = L10n.T("将提交 ", "Commits ") + versioned.Count +
+                    L10n.T(" 个文件到 SVN，说明可留空；点击后需二次确认。", " file(s) to SVN; the message is optional and confirmation is required.");
             }
 
             var dirty = versioned.Count(f => f.DirtyOnly);
