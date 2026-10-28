@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.ComponentModel;
 using System.Diagnostics;
@@ -1226,7 +1226,110 @@ namespace SvnChangelistView
 
         private void CommitChecked()
         {
-            CommitWithTortoise(_currentFiles.Where(f => f.IsChecked).ToList());
+            CommitDirect(_currentFiles.Where(f => f.IsChecked).ToList());
+        }
+
+        /// <summary>
+        /// 直接提交到 SVN（不打开 TortoiseSVN 的提交对话框）。
+        /// 提交说明可选：留空时用 --force-log 允许空日志；说明写入临时文件按 UTF-8 传给 svn。
+        /// </summary>
+        private async void CommitDirect(List<FileEntry> files)
+        {
+            if (_committing) return;
+
+            var targets = GetVersionedCommitTargets(files)
+                .GroupBy(f => f.FullPath, StringComparer.OrdinalIgnoreCase)
+                .Select(g => g.First())
+                .ToList();
+            if (targets.Count == 0)
+            {
+                SetStatus(L10n.T("没有可提交的文件：请先移出 ignore-on-commit；未版本控制项目请先加入 SVN。",
+                    "Nothing to commit: remove items from ignore-on-commit first; add unversioned items to SVN first."));
+                return;
+            }
+
+            var svnExe = FindSvnExe();
+            if (svnExe == null)
+            {
+                SetStatus(L10n.T("找不到 svn.exe，请确认已安装 TortoiseSVN", "svn.exe not found; please install TortoiseSVN"));
+                return;
+            }
+
+            var message = (_commitMessageBox != null ? _commitMessageBox.Text ?? "" : "")
+                .Replace("\r\n", "\n").TrimEnd();
+            var root = _lastRoot ?? (GetSolutionDirectory() ?? Environment.CurrentDirectory);
+
+            _committing = true;
+            UpdateSelectionUi();
+            SetStatus(L10n.T("正在提交 ", "Committing ") + targets.Count + L10n.T(" 个文件…", " file(s)…"));
+
+            string messageFile = null;
+            string output = null, error = null;
+            var rc = -1;
+            try
+            {
+                messageFile = Path.Combine(Path.GetTempPath(), "svnclv-commit-" + Guid.NewGuid().ToString("N") + ".txt");
+                File.WriteAllText(messageFile, message, new UTF8Encoding(false));
+                var args = "commit --encoding UTF-8 -F \"" + messageFile + "\"" +
+                           (message.Length == 0 ? " --force-log" : "") + " " +
+                           string.Join(" ", targets.Select(f => "\"" + f.FullPath + "\""));
+                await System.Threading.Tasks.Task.Run(() => output = RunSvn(svnExe, args, root, out error, out rc));
+            }
+            catch (Exception ex)
+            {
+                error = ex.Message;
+                rc = -1;
+            }
+            finally
+            {
+                if (messageFile != null)
+                {
+                    try { File.Delete(messageFile); } catch { }
+                }
+            }
+
+            _committing = false;
+
+            if (rc == 0)
+            {
+                var revision = FindCommittedRevision(output);
+                if (_commitMessageBox != null) _commitMessageBox.Text = "";
+                SetStatus(L10n.T("已提交 ", "Committed ") + targets.Count + L10n.T(" 个文件", " file(s)") +
+                          (string.IsNullOrEmpty(revision) ? "" : " · r" + revision));
+                StartRefresh();
+            }
+            else
+            {
+                SetStatus(L10n.T("提交失败：", "Commit failed: ") + FirstMeaningfulLine(error, output));
+            }
+
+            UpdateSelectionUi();
+        }
+
+        private static string FindCommittedRevision(string output)
+        {
+            if (string.IsNullOrEmpty(output)) return null;
+            const string marker = "revision ";
+            var index = output.IndexOf(marker, StringComparison.OrdinalIgnoreCase);
+            if (index < 0) return null;
+            var start = index + marker.Length;
+            var end = start;
+            while (end < output.Length && char.IsDigit(output[end])) end++;
+            return end > start ? output.Substring(start, end - start) : null;
+        }
+
+        private static string FirstMeaningfulLine(string first, string second)
+        {
+            foreach (var candidate in new[] { first, second })
+            {
+                if (string.IsNullOrWhiteSpace(candidate)) continue;
+                foreach (var line in candidate.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries))
+                {
+                    var trimmed = line.Trim();
+                    if (trimmed.Length > 0) return trimmed;
+                }
+            }
+            return "";
         }
 
         private void AddUnversioned(List<FileEntry> files)
@@ -1241,58 +1344,6 @@ namespace SvnChangelistView
             if (MessageBox.Show(message, L10n.T("加入 SVN", "Add to SVN"), MessageBoxButton.YesNo,
                 MessageBoxImage.Question, MessageBoxResult.No) == MessageBoxResult.Yes)
                 OpenTortoise("add", "\"" + string.Join("*", targets) + "\"");
-        }
-
-        private void CommitWithTortoise(List<FileEntry> files)
-        {
-            var targets = GetVersionedCommitTargets(files);
-            if (targets.Count == 0)
-            {
-                SetStatus(L10n.T("没有可提交的文件：请先移出 ignore-on-commit；未版本控制项目请先加入 SVN。",
-                    "Nothing to commit: remove items from ignore-on-commit first; add unversioned items to SVN first."));
-                return;
-            }
-
-            var exe = FindTortoiseProc();
-            if (exe == null)
-            {
-                SetStatus(L10n.T("找不到 TortoiseProc.exe", "TortoiseProc.exe not found"));
-                return;
-            }
-
-            string args;
-            if (targets.Count == 1)
-            {
-                args = "/command:commit /path:\"" + targets[0].FullPath + "\"";
-            }
-            else
-            {
-                // TortoiseSVN 支持用 * 分隔的多个路径
-                args = "/command:commit /path:\"" + string.Join("*", targets.Select(f => f.FullPath)) + "\"";
-            }
-
-            try
-            {
-                var psi = new ProcessStartInfo
-                {
-                    FileName = exe,
-                    Arguments = args,
-                    UseShellExecute = true
-                };
-                var proc = new Process { StartInfo = psi, EnableRaisingEvents = true };
-                proc.Exited += (s, e) =>
-                {
-                    proc.Dispose();
-                    Dispatcher.BeginInvoke(new Action(StartRefresh));
-                };
-                proc.Start();
-                SetStatus(L10n.T("已打开 TortoiseSVN 提交对话框（", "Opened TortoiseSVN commit dialog (") +
-                          targets.Count + L10n.T(" 个文件）", " files)"));
-            }
-            catch (Exception ex)
-            {
-                SetStatus(L10n.T("打开提交对话框失败: ", "Failed to open commit dialog: ") + ex.Message);
-            }
         }
 
         private void OnDoubleClick(object sender, MouseButtonEventArgs e)
@@ -1436,8 +1487,8 @@ namespace SvnChangelistView
                         () => OpenTortoise("update", "\"" + file.FullPath + "\"")));
                     if (versionedTargets.Count > 0)
                         menu.Items.Add(MakeItem(
-                            L10n.T("Commit...（提交 ", "Commit... (") + versionedTargets.Count + L10n.T(" 个文件）", " files)"),
-                            () => CommitWithTortoise(versionedTargets)));
+                            L10n.T("提交 ", "Commit ") + versionedTargets.Count + L10n.T(" 个文件", " files"),
+                            () => CommitDirect(versionedTargets)));
                     menu.Items.Add(MakeItem(L10n.T("Revert Changes...（还原 ", "Revert Changes... (") + n +
                         L10n.T(" 个文件）", " files)"), () => OpenTortoise("revert",
                         "\"" + string.Join("*", targets.Select(f => f.FullPath)) + "\"")));
@@ -1507,8 +1558,8 @@ namespace SvnChangelistView
                     var eligible = GetVersionedCommitTargets(targets);
                     if (eligible.Count > 0)
                     {
-                        menu.Items.Add(MakeItem(L10n.T("提交全部可提交文件…", "Commit all eligible files…"),
-                            () => CommitWithTortoise(eligible)));
+                        menu.Items.Add(MakeItem(L10n.T("提交全部可提交文件", "Commit all eligible files"),
+                            () => CommitDirect(eligible)));
                         menu.Items.Add(MakeItem(L10n.T("加入 ignore-on-commit", "Add to ignore-on-commit"),
                             () => RunChangelistBatch(IgnoreChangelistName, eligible)));
                     }

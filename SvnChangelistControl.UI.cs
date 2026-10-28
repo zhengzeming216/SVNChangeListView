@@ -32,6 +32,11 @@ namespace SvnChangelistView
         private Button _moreButton;
         private Button _addButton;
         private Button _clearButton;
+        private TextBox _commitMessageBox;
+        private TextBlock _commitHintText;
+        private TextBlock _commitCountText;
+        private TextBlock _commitLabelText;
+        private bool _committing;
         private Border _selectionBar;
         private DateTime? _lastUiRefresh;
         private int _summaryChanges;
@@ -60,6 +65,7 @@ namespace SvnChangelistView
             var layout = new Grid { ClipToBounds = true };
             layout.RowDefinitions.Add(new RowDefinition { Height = new GridLength(35) });
             layout.RowDefinitions.Add(new RowDefinition { Height = new GridLength(32) });
+            layout.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
             layout.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
             layout.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
             layout.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
@@ -95,6 +101,7 @@ namespace SvnChangelistView
             Grid.SetColumn(_rootCountText, 2);
             path.Children.Add(_rootCountText);
             layout.Children.Add(MakeUiBand(path, 1, false));
+            layout.Children.Add(MakeUiBand(CreateCommitComposer(), 2, true));
 
             _tree = new TreeView
             {
@@ -129,7 +136,7 @@ namespace SvnChangelistView
             _emptyText.TextAlignment = TextAlignment.Center;
             _emptyText.IsHitTestVisible = false;
             treeArea.Children.Add(_emptyText);
-            Grid.SetRow(treeArea, 2);
+            Grid.SetRow(treeArea, 3);
             layout.Children.Add(treeArea);
 
             var selection = new DockPanel { Margin = new Thickness(9, 0, 6, 0), LastChildFill = true };
@@ -146,7 +153,7 @@ namespace SvnChangelistView
             selection.Children.Add(actions);
             _checkedText = MakeUiText("");
             selection.Children.Add(_checkedText);
-            _selectionBar = MakeUiBand(selection, 3, true);
+            _selectionBar = MakeUiBand(selection, 4, true);
             _selectionBar.MinHeight = 30;
             layout.Children.Add(_selectionBar);
 
@@ -162,21 +169,113 @@ namespace SvnChangelistView
             _refreshTimeText = MakeUiText("");
             Grid.SetColumn(_refreshTimeText, 1);
             footer.Children.Add(_refreshTimeText);
-            layout.Children.Add(MakeUiBand(footer, 4, true));
+            layout.Children.Add(MakeUiBand(footer, 5, true));
             Content = layout;
             ApplyLanguage();
+        }
+
+        /// <summary>
+        /// 列表上方的提交说明区。说明是可选输入：留空也能提交（svn commit --force-log），
+        /// 点击工具栏“提交”后直接把已勾选文件写入 SVN 仓库，不再弹出第二个提交编辑窗口。
+        /// </summary>
+        private FrameworkElement CreateCommitComposer()
+        {
+            var stack = new StackPanel { Margin = new Thickness(9, 6, 9, 7) };
+
+            var labelRow = new Grid { HorizontalAlignment = HorizontalAlignment.Stretch };
+            labelRow.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+            labelRow.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+            _commitLabelText = MakeUiText(L10n.T("提交说明", "Commit message"));
+            _commitLabelText.FontWeight = FontWeights.SemiBold;
+            labelRow.Children.Add(_commitLabelText);
+            _commitCountText = MakeUiText("0");
+            _commitCountText.Margin = new Thickness(6, 0, 0, 0);
+            _commitCountText.Opacity = 0.75;
+            Grid.SetColumn(_commitCountText, 1);
+            labelRow.Children.Add(_commitCountText);
+
+            _commitMessageBox = new TextBox
+            {
+                AcceptsReturn = true,
+                TextWrapping = TextWrapping.Wrap,
+                MinHeight = 58,
+                MaxHeight = 140,
+                Margin = new Thickness(0, 4, 0, 0),
+                Padding = new Thickness(6, 4, 6, 4),
+                BorderThickness = new Thickness(1),
+                VerticalContentAlignment = VerticalAlignment.Top,
+                VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+                HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled
+            };
+            _commitMessageBox.SetResourceReference(Control.BackgroundProperty, EnvironmentColors.ComboBoxBackgroundBrushKey);
+            _commitMessageBox.SetResourceReference(Control.ForegroundProperty, EnvironmentColors.ComboBoxTextBrushKey);
+            _commitMessageBox.SetResourceReference(Control.BorderBrushProperty, EnvironmentColors.ComboBoxBorderBrushKey);
+            _commitMessageBox.TextChanged += (s, e) => UpdateCommitComposerUi();
+            _commitMessageBox.PreviewKeyDown += (s, e) =>
+            {
+                // Ctrl+Enter 直接提交；单独 Enter 仍用于换行。
+                if (e.Key == Key.Enter && (Keyboard.Modifiers & ModifierKeys.Control) == 0) return;
+                if (e.Key != Key.Enter) return;
+                e.Handled = true;
+                CommitChecked();
+            };
+
+            _commitHintText = MakeUiText("");
+            _commitHintText.TextWrapping = TextWrapping.Wrap;
+            _commitHintText.TextTrimming = TextTrimming.None;
+            _commitHintText.Margin = new Thickness(0, 4, 0, 0);
+            _commitHintText.Opacity = 0.8;
+            AutomationProperties.SetLiveSetting(_commitHintText, AutomationLiveSetting.Polite);
+
+            stack.Children.Add(labelRow);
+            stack.Children.Add(_commitMessageBox);
+            stack.Children.Add(_commitHintText);
+            return stack;
+        }
+
+        private void UpdateCommitComposerUi()
+        {
+            if (_commitCountText == null || _commitHintText == null) return;
+            var text = _commitMessageBox != null ? _commitMessageBox.Text ?? "" : "";
+            _commitCountText.Text = text.Length + L10n.T(" 字", " chars");
+
+            var versioned = CheckedUiFiles(false);
+            if (_committing)
+            {
+                _commitHintText.Text = L10n.T("正在提交，请稍候…", "Committing, please wait…");
+            }
+            else if (versioned.Count == 0)
+            {
+                _commitHintText.Text = L10n.T("勾选 Changes 中的文件后点击“提交”即可直接写入 SVN；说明可留空。",
+                    "Check files under Changes, then click Commit to write them straight to SVN; the message may be empty.");
+            }
+            else
+            {
+                _commitHintText.Text = L10n.T("将直接提交 ", "Commits ") + versioned.Count +
+                    L10n.T(" 个文件到 SVN，说明可留空。", " file(s) straight to SVN; the message is optional.");
+            }
+
+            var dirty = versioned.Count(f => f.DirtyOnly);
+            if (!_committing && dirty > 0)
+            {
+                _commitHintText.Text += L10n.T(" 其中 " + dirty + " 个文件有未保存修改，将提交磁盘上已保存的内容。",
+                    " " + dirty + " file(s) have unsaved edits; the saved on-disk content will be committed.");
+            }
+
+            if (_commitMessageBox != null) _commitMessageBox.IsEnabled = !_committing;
         }
 
         private void ApplyLanguage()
         {
             if (_tree == null) return;
-            SetUiButtonText(_commitButton, L10n.T("提交…", "Commit…"), L10n.T("提交已勾选的版本控制文件", "Commit checked versioned files"));
+            SetUiButtonText(_commitButton, L10n.T("提交", "Commit"), L10n.T("直接提交已勾选的版本控制文件到 SVN；提交说明可留空", "Commit checked versioned files straight to SVN; the message is optional"));
             SetUiButtonText(_updateButton, L10n.T("更新", "Update"), L10n.T("更新工作副本", "Update working copy"));
             SetUiButtonText(_refreshButton, L10n.T("刷新", "Refresh"), L10n.T("刷新 SVN 状态", "Refresh SVN status"));
             SetUiButtonText(_collapseButton, L10n.T("全部折叠", "Collapse All"), L10n.T("折叠所有分组和目录", "Collapse all groups and folders"));
             SetUiButtonText(_moreButton, L10n.T("更多", "More"), L10n.T("更多操作", "More actions"));
             SetUiButtonText(_addButton, L10n.T("加入 SVN", "Add to SVN"), L10n.T("将已勾选的未版本控制项目加入 SVN；目录范围由确认对话框确认", "Add checked unversioned items to SVN; confirm directory scope in the dialog"));
             SetUiButtonText(_clearButton, L10n.T("清除", "Clear"), L10n.T("清除全部勾选", "Clear all checkmarks"));
+            if (_commitLabelText != null) _commitLabelText.Text = L10n.T("提交说明", "Commit message");
             UpdateCaption();
             RepopulateFromCache();
             if (!_hasUiSummary)
@@ -417,8 +516,9 @@ namespace SvnChangelistView
             _selectionBar.Visibility = versioned + unversioned == 0 ? Visibility.Collapsed : Visibility.Visible;
             _addButton.Visibility = unversioned > 0 ? Visibility.Visible : Visibility.Collapsed;
             _addButton.IsEnabled = unversioned > 0;
-            _commitButton.IsEnabled = versioned > 0;
-            _clearButton.IsEnabled = versioned + unversioned > 0;
+            _commitButton.IsEnabled = versioned > 0 && !_committing;
+            _clearButton.IsEnabled = versioned + unversioned > 0 && !_committing;
+            UpdateCommitComposerUi();
         }
 
         private void UpdateSummaryUi(int changes, int ignore, int unversioned, int custom, bool refreshed)
