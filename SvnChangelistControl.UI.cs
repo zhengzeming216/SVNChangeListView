@@ -676,6 +676,13 @@ namespace SvnChangelistView
             UpdateCommitComposerUi();
         }
 
+        /// <summary>丢弃中间态快照后把状态文字恢复成上一次的摘要，保持"冻结"观感。</summary>
+        private void RestoreFrozenSummary()
+        {
+            if (!_hasUiSummary) return;
+            UpdateSummaryUi(_summaryChanges, _summaryIgnore, _summaryUnversioned, _summaryCustom, false);
+        }
+
         private void UpdateSummaryUi(int changes, int ignore, int unversioned, int custom, bool refreshed)
         {
             _hasUiSummary = true;

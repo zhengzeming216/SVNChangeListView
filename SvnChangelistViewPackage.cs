@@ -58,6 +58,7 @@ namespace SvnChangelistView
 
             SvnChangelistControl.IgnoreCountChanged += OnIgnoreCountChanged;
             SvnChangelistControl.CountsChanged += OnCountsChanged;
+            SvnChangelistControl.SvnWriteEnded += OnSvnWriteEnded;
 
             // 状态栏徽标：主窗口可视树就绪后注入，最多重试 10 次（每 2 秒）
             _ = this.JoinableTaskFactory.RunAsync(async () =>
@@ -145,6 +146,13 @@ namespace SvnChangelistView
                 return;
             }
 
+            _ = RefreshBadgeAsync();
+        }
+
+        /// <summary>写操作结束后，若工具窗口没打开，徽标也要补刷一次真实数量。</summary>
+        private void OnSvnWriteEnded()
+        {
+            if (SvnChangelistControl.HasLiveInstance) return;
             _ = RefreshBadgeAsync();
         }
 
@@ -277,7 +285,13 @@ namespace SvnChangelistView
             _badgeBusy = true;
             try
             {
-                await SvnChangelistControl.ComputeBadgeCountsAsync(solDir);
+                // 返回 null 表示读到 update 中间态：保留旧徽标，稍后重试直到拿到干净快照。
+                for (var attempt = 0; attempt < 5; attempt++)
+                {
+                    var counts = await SvnChangelistControl.ComputeBadgeCountsAsync(solDir);
+                    if (counts != null) break;
+                    await Task.Delay(900);
+                }
             }
             finally
             {

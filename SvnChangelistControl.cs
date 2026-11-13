@@ -126,6 +126,59 @@ namespace SvnChangelistView
             get { return _liveInstances > 0; }
         }
 
+        // ---------- SVN 写操作期间的刷新冻结 ----------
+
+        /// <summary>插件发起的 SVN 写操作（拉取 / 推送 / 同步 / 加入 / 还原）嵌套深度。</summary>
+        private static int _svnWriteDepth;
+
+        /// <summary>防止外部进程 Exited 事件丢失导致永久冻结的兜底截止时间。</summary>
+        private static DateTime _svnWriteDeadlineUtc = DateTime.MinValue;
+
+        /// <summary>连续读到工作副本中间态的起始时间，避免残留锁导致永远不刷新。</summary>
+        private static DateTime _transientSinceUtc = DateTime.MinValue;
+
+        private DispatcherTimer _transientRetryTimer;
+
+        /// <summary>写操作全部结束时通知：此时才做一次真实的刷新。</summary>
+        public static event Action SvnWriteEnded;
+
+        /// <summary>是否处于刷新冻结期（列表与徽标保持上一次的值）。</summary>
+        public static bool IsRefreshFrozen
+        {
+            get { return _svnWriteDepth > 0 || DateTime.UtcNow < _svnWriteDeadlineUtc; }
+        }
+
+        /// <summary>开始一段 SVN 写操作：期间冻结刷新，结束后统一刷一次。</summary>
+        public static void BeginSvnWrite()
+        {
+            _svnWriteDepth++;
+            _svnWriteDeadlineUtc = DateTime.UtcNow.AddMinutes(15);
+        }
+
+        /// <summary>结束一段 SVN 写操作；全部结束后触发一次真实刷新。</summary>
+        public static void EndSvnWrite()
+        {
+            if (_svnWriteDepth > 0) _svnWriteDepth--;
+            if (_svnWriteDepth > 0) return;
+
+            _svnWriteDeadlineUtc = DateTime.MinValue;
+            _transientSinceUtc = DateTime.MinValue;
+            RefreshRequested?.Invoke();
+            SvnWriteEnded?.Invoke();
+        }
+
+        /// <summary>
+        /// svn update 期间 wc.db 处于中间态：会报 item="incomplete"、wc-locked="true"，
+        /// 并把尚未落盘的文件报成 missing、已完成的目录报成 normal。
+        /// 这类快照不是真实改动，必须整份丢弃，否则 Changes 会瞬时暴涨再消失。
+        /// </summary>
+        private static bool IsTransientStatusXml(string xml)
+        {
+            if (string.IsNullOrEmpty(xml)) return false;
+            return xml.IndexOf("item=\"incomplete\"", StringComparison.Ordinal) >= 0 ||
+                   xml.IndexOf("wc-locked=\"true\"", StringComparison.Ordinal) >= 0;
+        }
+
         private List<FileEntry> _currentFiles = new List<FileEntry>();
         private readonly HashSet<FileEntry> _selected = new HashSet<FileEntry>();
         private FileEntry _lastClicked;
@@ -254,12 +307,22 @@ namespace SvnChangelistView
                 if (command == "commit" || command == "update" || command == "revert" || command == "add")
                 {
                     var proc = new Process { StartInfo = psi, EnableRaisingEvents = true };
+                    // 外部 SVN 进程写工作副本期间冻结刷新；进程退出后再刷一次真实状态。
+                    BeginSvnWrite();
                     proc.Exited += (s, e) =>
                     {
                         proc.Dispose();
-                        Dispatcher.BeginInvoke(new Action(StartRefresh));
+                        Dispatcher.BeginInvoke(new Action(EndSvnWrite));
                     };
-                    proc.Start();
+                    try
+                    {
+                        proc.Start();
+                    }
+                    catch
+                    {
+                        EndSvnWrite();
+                        throw;
+                    }
                 }
                 else
                 {
@@ -334,6 +397,13 @@ namespace SvnChangelistView
 
         private async void StartRefresh()
         {
+            // 拉取 / 推送等写操作进行中，工作副本正处于中间态：
+            // 完全冻结列表与徽标（连状态文字都不动），等写操作结束后由 EndSvnWrite 统一刷一次真实状态。
+            if (IsRefreshFrozen)
+            {
+                return;
+            }
+
             if (_refreshBusy)
             {
                 _pendingRefresh = true;
@@ -419,6 +489,18 @@ namespace SvnChangelistView
                     XDocument.Parse(clXml).Root?.Name.LocalName != "status")
                     throw new InvalidOperationException("svn status 返回了无效的 XML");
 
+                // 工作副本正在被 update 时读到的是中间态快照，整份丢弃：
+                // 不 Populate、不抛 CountsChanged，保留上一次的列表、徽标与状态文字。
+                if ((IsTransientStatusXml(xml) || IsTransientStatusXml(clXml)) && ShouldDiscardTransientStatus())
+                {
+                    await Dispatcher.InvokeAsync(() =>
+                    {
+                        if (generation == _solutionGeneration) RestoreFrozenSummary();
+                    });
+                    return;
+                }
+                _transientSinceUtc = DateTime.MinValue;
+
                 var files = ParseStatusXml(xml, solutionDir);
                 var clFiles = ParseChangelistXml(clXml, solutionDir, IgnoreChangelistName);
 
@@ -478,6 +560,34 @@ namespace SvnChangelistView
             return (path ?? "").Replace('/', '\\').ToLowerInvariant();
         }
 
+        /// <summary>
+        /// 读到中间态快照时：返回 true 表示应丢弃并延后重刷；
+        /// 返回 false 表示已连续等待太久（例如工作副本真有残留锁），这次照常显示以免永远不刷新。
+        /// </summary>
+        private bool ShouldDiscardTransientStatus()
+        {
+            var now = DateTime.UtcNow;
+            if (_transientSinceUtc == DateTime.MinValue) _transientSinceUtc = now;
+            if ((now - _transientSinceUtc).TotalSeconds > 45)
+            {
+                _transientSinceUtc = DateTime.MinValue;
+                return false;
+            }
+
+            if (_transientRetryTimer == null)
+            {
+                _transientRetryTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(900) };
+                _transientRetryTimer.Tick += (s, e) =>
+                {
+                    _transientRetryTimer.Stop();
+                    _transientRetryTimer = null;
+                    StartRefresh();
+                };
+            }
+            _transientRetryTimer.Start();
+            return true;
+        }
+
         private static List<FileEntry> ParseStatusXml(string xml, string anchorDir)
         {
             var result = new List<FileEntry>();
@@ -510,7 +620,8 @@ namespace SvnChangelistView
                     var item = (string)wcStatus.Attribute("item") ?? "";
                     var changelist = (string)wcStatus.Attribute("changelist");
 
-                    if (item == "external" || item == "ignored")
+                    // incomplete 是 svn update 期间 wc.db 的内部状态，不是用户的改动。
+                    if (item == "external" || item == "ignored" || item == "incomplete")
                     {
                         continue;
                     }
@@ -576,7 +687,8 @@ namespace SvnChangelistView
                     }
 
                     var item = (string)wcStatus.Attribute("item") ?? "";
-                    if (item == "external" || item == "ignored")
+                    // incomplete 是 svn update 期间 wc.db 的内部状态，不是用户的改动。
+                    if (item == "external" || item == "ignored" || item == "incomplete")
                     {
                         continue;
                     }
@@ -758,6 +870,9 @@ namespace SvnChangelistView
         /// </summary>
         public static async System.Threading.Tasks.Task<int[]> ComputeBadgeCountsAsync(string solutionDir)
         {
+            // 写操作期间冻结徽标：保留上一次数值，结束后由 SvnWriteEnded 统一刷新。
+            if (IsRefreshFrozen) return new[] { 0, 0 };
+
             var svnExe = FindSvnExe();
             if (svnExe == null || string.IsNullOrWhiteSpace(solutionDir))
             {
@@ -781,6 +896,12 @@ namespace SvnChangelistView
             {
                 // svn 查询失败（例如瞬时错误）：不抛事件，保留上一次的徽标数值
                 return new[] { 0, 0 };
+            }
+
+            // 返回 null 表示读到的是 update 中间态快照：不抛事件、保留旧徽标，由调用方延后重试。
+            if (IsTransientStatusXml(xml) || IsTransientStatusXml(clXml))
+            {
+                return null;
             }
 
             var files = ParseStatusXml(xml, solutionDir);
@@ -1273,84 +1394,93 @@ namespace SvnChangelistView
                 return;
             }
 
-            _committing = true;
-            UpdateSelectionUi();
-            SetStatus(L10n.T("正在提交 ", "Committing ") + targets.Count + L10n.T(" 个文件…", " file(s)…"));
-
-            if (pullFirst)
+            // 同步（先 update 再 commit）与推送都会写工作副本，全程冻结刷新，结束后统一刷一次。
+            BeginSvnWrite();
+            try
             {
-                SetStatus(L10n.T("正在拉取（Update）…", "Pulling (update)…"));
-                string updateOut = null, updateErr = null;
-                var updateRc = -1;
+                _committing = true;
+                UpdateSelectionUi();
+                SetStatus(L10n.T("正在提交 ", "Committing ") + targets.Count + L10n.T(" 个文件…", " file(s)…"));
+
+                if (pullFirst)
+                {
+                    SetStatus(L10n.T("正在拉取（Update）…", "Pulling (update)…"));
+                    string updateOut = null, updateErr = null;
+                    var updateRc = -1;
+                    try
+                    {
+                        await System.Threading.Tasks.Task.Run(() =>
+                            updateOut = RunSvn(svnExe, "update --accept postpone", root, out updateErr, out updateRc));
+                    }
+                    catch (Exception ex)
+                    {
+                        updateErr = ex.Message;
+                        updateRc = -1;
+                    }
+
+                    var conflicted = (updateOut != null &&
+                                      (updateOut.IndexOf("Summary of conflicts", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                                       updateOut.Contains("冲突摘要"))) ||
+                                     (updateErr != null && updateErr.IndexOf("conflict", StringComparison.OrdinalIgnoreCase) >= 0);
+                    if (updateRc != 0 || conflicted)
+                    {
+                        _committing = false;
+                        SetStatus((updateRc != 0
+                                      ? L10n.T("拉取失败，已中止提交：", "Pull failed; commit aborted: ")
+                                      : L10n.T("拉取产生冲突，已中止提交，请先解决冲突：", "Pull produced conflicts; resolve them before committing: ")) +
+                                  FirstMeaningfulLine(updateErr, updateOut));
+                        UpdateSelectionUi();
+                        StartRefresh();
+                        return;
+                    }
+                }
+
+                string messageFile = null;
+                string output = null, error = null;
+                var rc = -1;
                 try
                 {
-                    await System.Threading.Tasks.Task.Run(() =>
-                        updateOut = RunSvn(svnExe, "update --accept postpone", root, out updateErr, out updateRc));
+                    messageFile = Path.Combine(Path.GetTempPath(), "svnclv-commit-" + Guid.NewGuid().ToString("N") + ".txt");
+                    File.WriteAllText(messageFile, message, new UTF8Encoding(false));
+                    var args = "commit --encoding UTF-8 -F \"" + messageFile + "\"" +
+                               (message.Length == 0 ? " --force-log" : "") + " " +
+                               string.Join(" ", targets.Select(f => "\"" + f.FullPath + "\""));
+                    await System.Threading.Tasks.Task.Run(() => output = RunSvn(svnExe, args, root, out error, out rc));
                 }
                 catch (Exception ex)
                 {
-                    updateErr = ex.Message;
-                    updateRc = -1;
+                    error = ex.Message;
+                    rc = -1;
                 }
-
-                var conflicted = (updateOut != null &&
-                                  (updateOut.IndexOf("Summary of conflicts", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                                   updateOut.Contains("冲突摘要"))) ||
-                                 (updateErr != null && updateErr.IndexOf("conflict", StringComparison.OrdinalIgnoreCase) >= 0);
-                if (updateRc != 0 || conflicted)
+                finally
                 {
-                    _committing = false;
-                    SetStatus((updateRc != 0
-                                  ? L10n.T("拉取失败，已中止提交：", "Pull failed; commit aborted: ")
-                                  : L10n.T("拉取产生冲突，已中止提交，请先解决冲突：", "Pull produced conflicts; resolve them before committing: ")) +
-                              FirstMeaningfulLine(updateErr, updateOut));
-                    UpdateSelectionUi();
-                    StartRefresh();
-                    return;
+                    if (messageFile != null)
+                    {
+                        try { File.Delete(messageFile); } catch { }
+                    }
                 }
-            }
 
-            string messageFile = null;
-            string output = null, error = null;
-            var rc = -1;
-            try
-            {
-                messageFile = Path.Combine(Path.GetTempPath(), "svnclv-commit-" + Guid.NewGuid().ToString("N") + ".txt");
-                File.WriteAllText(messageFile, message, new UTF8Encoding(false));
-                var args = "commit --encoding UTF-8 -F \"" + messageFile + "\"" +
-                           (message.Length == 0 ? " --force-log" : "") + " " +
-                           string.Join(" ", targets.Select(f => "\"" + f.FullPath + "\""));
-                await System.Threading.Tasks.Task.Run(() => output = RunSvn(svnExe, args, root, out error, out rc));
-            }
-            catch (Exception ex)
-            {
-                error = ex.Message;
-                rc = -1;
+                _committing = false;
+
+                if (rc == 0)
+                {
+                    var revision = FindCommittedRevision(output);
+                    if (_commitMessageBox != null) _commitMessageBox.Text = "";
+                    SetStatus(L10n.T("已提交 ", "Committed ") + targets.Count + L10n.T(" 个文件", " file(s)") +
+                              (string.IsNullOrEmpty(revision) ? "" : " · r" + revision));
+                    StartRefresh();
+                }
+                else
+                {
+                    SetStatus(L10n.T("提交失败：", "Commit failed: ") + FirstMeaningfulLine(error, output));
+                }
+
+                UpdateSelectionUi();
             }
             finally
             {
-                if (messageFile != null)
-                {
-                    try { File.Delete(messageFile); } catch { }
-                }
+                EndSvnWrite();
             }
-
-            _committing = false;
-
-            if (rc == 0)
-            {
-                var revision = FindCommittedRevision(output);
-                if (_commitMessageBox != null) _commitMessageBox.Text = "";
-                SetStatus(L10n.T("已提交 ", "Committed ") + targets.Count + L10n.T(" 个文件", " file(s)") +
-                          (string.IsNullOrEmpty(revision) ? "" : " · r" + revision));
-                StartRefresh();
-            }
-            else
-            {
-                SetStatus(L10n.T("提交失败：", "Commit failed: ") + FirstMeaningfulLine(error, output));
-            }
-
-            UpdateSelectionUi();
         }
 
         private static string FindCommittedRevision(string output)
